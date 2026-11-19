@@ -23,6 +23,9 @@ export interface SheetData {
   cellStyles: [number, number[]][];
   columns: { widths: Record<string, number>; hidden: number[] };
   freezeHeader?: boolean; // v1 only
+  /** Sheet size in rows/columns (older files: worked out from the data). */
+  gridRows?: number;
+  gridCols?: number;
   frozenRows?: number;
   frozenCols?: number;
   /** Merged ranges [r0, c0, r1, c1]. */
@@ -95,6 +98,8 @@ export function sheetToData(doc: Doc): SheetData {
     },
     frozenRows: doc.frozenRows,
     frozenCols: doc.frozenCols,
+    gridRows: doc.gridRows,
+    gridCols: doc.gridCols,
     merges: doc.merges.filter((m) => m.r0 < n).map((m) => [m.r0, m.c0, Math.min(m.r1, n - 1), m.c1]),
     filters: Object.fromEntries([...doc.filters].map(([k, v]) => [String(k), [...v]])),
     csv: { delimiter: doc.delim, lineEnding: doc.eol, encoding: doc.encoding, bom: doc.bom },
@@ -112,6 +117,8 @@ export function sheetFromData(doc: Doc, file: SheetData) {
   doc.hidden = new Set(file.columns?.hidden ?? []);
   doc.frozenRows = file.frozenRows ?? (file.freezeHeader === false ? 0 : 1);
   doc.frozenCols = file.frozenCols ?? 0;
+  if (file.gridRows) doc.gridRows = Math.max(file.gridRows, doc.rows.length);
+  if (file.gridCols) doc.gridCols = Math.max(file.gridCols, doc.cols);
   doc.merges = (file.merges ?? []).map(([r0, c0, r1, c1]) => ({ r0, c0, r1, c1 }));
   doc.filters = new Map(Object.entries(file.filters ?? {}).map(([k, v]) => [Number(k), new Set(v)]));
   if (file.csv) {

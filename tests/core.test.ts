@@ -101,6 +101,24 @@ eq(md.sortBy(0, false), false, "sort refused with vertical merge");
 md.undo(); md.undo(); md.undo();
 eq([md.merges.length, md.raw(1,1), md.raw(2,0)], [0, "b", "c"], "undo merge restores values");
 
+// Sheet size: inserting/deleting changes it even where there's no data
+const gd = new Doc("g", null);
+eq([gd.displayRows(), gd.displayCols()], [1000, 26], "new sheet is 1000 x 26");
+gd.insertCols(26, 1);
+eq(gd.displayCols(), 27, "insert right of Z adds AA");
+gd.insertCols(25, 1);
+eq(gd.displayCols(), 28, "insert left of Z");
+gd.deleteCols(25, 1);
+eq(gd.displayCols(), 27, "delete column shrinks the sheet");
+gd.undo(); gd.undo(); gd.undo();
+eq(gd.displayCols(), 26, "undo restores width");
+gd.deleteRows([999]);
+eq(gd.displayRows(), 999, "deleting an empty row shrinks the sheet");
+gd.insertRows(500, 3);
+eq(gd.displayRows(), 1002, "inserting rows below data grows it");
+gd.undo(); gd.undo();
+eq(gd.displayRows(), 1000, "undo restores height");
+
 // Fill handle series
 eq(fillValues(["5"], 3, false), ["5","5","5"], "single number copies");
 eq(fillValues(["5"], 3, false, true), ["6","7","8"], "Ctrl counts single number");

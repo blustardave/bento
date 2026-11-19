@@ -63,6 +63,13 @@ export class Doc {
   set source(v: import("./native").FileRef | null) { this.book.source = v; }
   rows: string[][] = [];
   cols = 0;
+  /**
+   * The sheet's size: how many rows and columns it has, whether or not
+   * they hold anything (like Sheets: a new sheet is 1,000 × 26). Inserting
+   * and deleting rows/columns changes these.
+   */
+  gridRows = 1000;
+  gridCols = 26;
   /** Rows/cols that belong in the saved file even if empty. */
   keepRows = 0;
   keepCols = 0;
@@ -139,11 +146,11 @@ export class Doc {
   /** Rows shown in the grid (includes spare empty rows when unfiltered). */
   displayRows(): number {
     if (this.view) return this.view.length;
-    return Math.max(this.rows.length + 100, 1000);
+    return Math.max(this.gridRows, this.rows.length);
   }
 
   displayCols(): number {
-    return Math.max(this.cols + 5, 26);
+    return Math.max(this.gridCols, this.cols);
   }
 
   dataRow(d: number): number {
@@ -200,6 +207,9 @@ export class Doc {
   /* ---------------------------- low level ---------------------------- */
 
   private put(r: number, c: number, v: string) {
+    // Pasting past the edge makes the sheet bigger, as in Sheets.
+    if (r >= this.gridRows) this.gridRows = r + 1;
+    if (c >= this.gridCols) this.gridCols = c + 1;
     while (this.rows.length <= r) this.rows.push([]);
     const row = this.rows[r];
     while (row.length < c) row.push("");
@@ -216,13 +226,16 @@ export class Doc {
     // Every step remembers the merges before and after, so undo/redo of
     // structural changes puts merged cells back exactly.
     const mBefore = this.merges.map((m) => ({ ...m }));
+    const gBefore = [this.gridRows, this.gridCols];
     let mAfter: Rect[] = [];
+    let gAfter = gBefore;
     const run = op.run, undo = op.undo;
     op.run = () => { run(); };
-    op.undo = () => { undo(); this.merges = mBefore.map((m) => ({ ...m })); };
+    op.undo = () => { undo(); this.merges = mBefore.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gBefore; };
     op.run();
     mAfter = this.merges.map((m) => ({ ...m }));
-    op.run = () => { run(); this.merges = mAfter.map((m) => ({ ...m })); };
+    gAfter = [this.gridRows, this.gridCols];
+    op.run = () => { run(); this.merges = mAfter.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gAfter; };
     this.undoStack.push(op);
     if (this.undoStack.length > MAX_UNDO) {
       const dropped = this.undoStack.shift();
@@ -477,23 +490,25 @@ export class Doc {
       selBefore: { ...this.sel },
       run: () => {
         before = this.rows;
-        const pad = Math.max(0, at - this.rows.length);
+        this.gridRows = Math.max(this.gridRows, this.rows.length) + n;
+        if (at >= this.rows.length) { fx = []; return; } // below the data: the sheet just gets longer
         const fresh: string[][] = [];
-        for (let i = 0; i < n + pad; i++) fresh.push([]);
+        for (let i = 0; i < n; i++) fresh.push([]);
         this.rows = [...this.rows.slice(0, at), ...fresh, ...this.rows.slice(at)];
         this.keepRows = Math.max(this.keepRows, 0) + n;
         fx = this.shiftFormulas("row", at, n);
         this.merges = this.merges.map((m) => m.r0 >= at ? { ...m, r0: m.r0 + n, r1: m.r1 + n } : m.r1 >= at ? { ...m, r1: m.r1 + n } : m);
         this.refreshView();
       },
-      undo: () => { this.restore(fx); this.rows = before; this.keepRows -= n; },
+      undo: () => { this.restore(fx); if (this.rows !== before) { this.rows = before; this.keepRows -= n; } },
     });
   }
 
   /** Delete data rows (any order, may be non-contiguous). */
   deleteRows(dataRows: number[]) {
-    const idx = [...new Set(dataRows)].filter((r) => r < this.rows.length).sort((a, b) => b - a);
-    if (!idx.length) return;
+    const all = new Set(dataRows);
+    if (!all.size) return;
+    const idx = [...all].filter((r) => r < this.rows.length).sort((a, b) => b - a);
     let before: string[][] = [];
     let fx: CellChange[] = [];
     this.push({
@@ -501,6 +516,8 @@ export class Doc {
       selBefore: { ...this.sel },
       run: () => {
         before = this.rows;
+        // The sheet loses these rows even if they were empty.
+        this.gridRows = Math.max(1, Math.max(this.gridRows, this.rows.length) - all.size);
         const drop = new Set(idx);
         this.rows = this.rows.filter((_, i) => !drop.has(i));
         const asc = [...idx].reverse();
@@ -543,6 +560,7 @@ export class Doc {
       run: () => {
         oldCols = this.cols;
         oldKeep = this.keepCols;
+        this.gridCols = Math.max(this.gridCols, this.cols) + n;
         const blanks = new Array<string>(n).fill("");
         const zeros = new Array<number>(n).fill(0);
         for (const row of this.rows) {
@@ -583,6 +601,7 @@ export class Doc {
       run: () => {
         oldCols = this.cols;
         oldKeep = this.keepCols;
+        this.gridCols = Math.max(1, Math.max(this.gridCols, this.cols) - n);
         oldMeta = [this.widths, this.hidden, this.filters];
         removed = this.rows.map((row) => (row.length > at ? row.splice(at, n) : null));
         removedSt = this.rows.map((row) => { const st = this.rowStyles.get(row); return st && st.length > at ? st.splice(at, n) : null; });
@@ -721,6 +740,8 @@ export class Doc {
     let cols = 0;
     for (const row of rows) if (row.length > cols) cols = row.length;
     this.cols = cols;
+    this.gridRows = Math.max(1000, rows.length + 100);
+    this.gridCols = Math.max(26, cols);
     this.keepRows = rows.length;
     this.keepCols = cols;
     this.undoStack = [];
