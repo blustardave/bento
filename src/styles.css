@@ -33,6 +33,32 @@
   color-scheme: light;
 }
 
+[data-theme="dusk"] {
+  /* Halfway between Light and Dark: a warm stone grey with light text. */
+  --bg: #4f4c47;
+  --surface: #45433e;
+  --surface-2: #5b5852;
+  --raised: #5a5751;
+  --line: #5c5953;
+  --line-strong: #6d6a63;
+  --text: #f4f2eb;
+  --text-2: #dcd9d0;
+  --muted: #b3afa5;
+  --accent: #ec9e81;
+  --accent-text: #f5b39b;
+  --accent-soft: rgba(236, 158, 129, 0.2);
+  --accent-softer: rgba(236, 158, 129, 0.1);
+  --sel-fill: rgba(236, 158, 129, 0.12);
+  --sel-head: rgba(236, 158, 129, 0.22);
+  --sel-head-strong: rgba(236, 158, 129, 0.32);
+  --on-accent: #33312d;
+  --error: #ff9585;
+  --match: rgba(240, 195, 90, 0.26);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 10px 30px rgba(0, 0, 0, 0.3);
+  --scrim: rgba(0, 0, 0, 0.3);
+  color-scheme: dark;
+}
+
 [data-theme="dark"] {
   --bg: #262624;
   --surface: #2d2c2a;
@@ -615,7 +641,7 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
   transition: transform var(--ease), box-shadow var(--ease);
 }
-[data-theme="dark"] .palette .swatch { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
+[data-theme="dark"] .palette .swatch, [data-theme="dusk"] .palette .swatch { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
 .palette .swatch:hover { transform: scale(1.12); }
 .palette .swatch.on { box-shadow: 0 0 0 2px var(--raised), 0 0 0 3.5px var(--accent); }
 .palette .swatch.add {

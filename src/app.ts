@@ -17,7 +17,7 @@ import { CURRENCIES, Style, detectCurrency } from "./format";
 import { appVersion, initUpdater } from "./updater";
 import { basename, cellName, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 
-type Theme = "system" | "light" | "dark";
+type Theme = "system" | "light" | "dusk" | "dark";
 const $ = (id: string) => document.getElementById(id)!;
 
 export class App {
@@ -37,7 +37,7 @@ export class App {
       return { style: d.style(r, d.sel.ac), header: d.freezeHeader && r === 0, shown: d.display(r, d.sel.ac) };
     },
     apply: (patch, label) => this.applyFormat(patch, label),
-    theme: () => (document.documentElement.dataset.theme === "dark" ? "dark" : "light"),
+    theme: () => (document.documentElement.dataset.theme === "light" ? "light" : "dark"),
     toggleMerge: () => this.toggleMerge(),
     selectionMerged: () => {
       const d = this.active;
@@ -495,7 +495,7 @@ export class App {
   private applyTheme() {
     const t = this.theme();
     const dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    document.documentElement.dataset.theme = t === "dusk" ? "dusk" : dark ? "dark" : "light";
     document.querySelectorAll<HTMLElement>("#theme-toggle button").forEach((b) => {
       const on = b.dataset.themeOpt === t;
       b.classList.toggle("on", on);

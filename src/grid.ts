@@ -337,7 +337,8 @@ export class Grid {
   private layout() {
     const d = this.doc;
     if (!d) { this.spacer.style.width = "1px"; this.spacer.style.height = "1px"; return; }
-    this.theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    // Dusk uses the dark versions of palette colours.
+    this.theme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
     const n = d.displayCols();
     if (this.xs.length !== n + 1) this.xs = new Float64Array(n + 1);
     let x = 0;
