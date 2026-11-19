@@ -203,13 +203,34 @@ const FILL_STRONG: Record<Hue, Pair> = {
   pink: { light: "#ecbfd4", dark: "#663654" },
 };
 
-export type Theme = "light" | "dark";
+export type Theme = "light" | "dark" | "dusk";
+
+/** Mix two hex colours: t = 0 → a, t = 1 → b. */
+function mix(a: string, b: string, t: number): string {
+  const p = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const [x, y] = [p(a), p(b)];
+  return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Dusk sits between Light and Dark, so neither set of palette colours fits:
+ * dark-mode text is too dim on it and dark-mode fills look muddy. Its own
+ * versions are derived from the others: lighter text, and fills that tint
+ * the Dusk background rather than darken it.
+ */
+const DUSK_BG = "#4f4c47";
+function duskColor(hue: Hue, tone: string | undefined): string {
+  if (tone === "1") return mix(DUSK_BG, TEXT[hue].light, 0.3);
+  if (tone === "2") return mix(DUSK_BG, TEXT[hue].light, 0.5);
+  return mix(TEXT[hue].dark, "#ffffff", 0.38);
+}
 
 /** Turn a stored colour into a real one for the current theme. */
 export function resolveColor(c: string | undefined, theme: Theme): string | null {
   if (!c) return null;
   if (c[0] !== "@") return c;
   const [hue, tone] = c.slice(1).split("-") as [Hue, string | undefined];
+  if (theme === "dusk") return TEXT[hue] ? duskColor(hue, tone) : null;
   const table = tone === "2" ? FILL_STRONG : tone === "1" ? FILL_SOFT : TEXT;
   return table[hue]?.[theme] ?? null;
 }

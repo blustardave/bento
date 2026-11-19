@@ -148,3 +148,21 @@ export const windowControls = {
     }
   },
 };
+
+/* ----------------------------- recovery ----------------------------- */
+
+export async function recoveryDir(): Promise<string | null> {
+  if (!isTauri) return null;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<string>("recovery_dir");
+}
+
+export async function listDir(path: string): Promise<string[]> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<string[]>("list_dir", { path });
+}
+
+export async function removeFile(path: string): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("remove_file", { path });
+}

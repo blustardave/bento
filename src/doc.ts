@@ -749,6 +749,8 @@ function shiftSet(s: Set<number>, at: number, delta: number): Set<number> {
 
 /** A file: one or more sheets, plus the file's name and location. */
 export class Book {
+  /** Stable id for this open file (names its crash-recovery copy). */
+  id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   name: string;
   path: string | null;
   source: import("./native").FileRef | null = null;
@@ -763,6 +765,11 @@ export class Book {
   }
 
   get sheet(): Doc { return this.sheets[this.current]; }
+
+  /** Changes whenever anything in the file changes (for AutoSave). */
+  get token(): string {
+    return this.sheets.map((s) => `${s.sheetName}:${s.version}`).join("|") + `|${this.structureDirty}`;
+  }
 
   get dirty(): boolean {
     return this.structureDirty || this.sheets.some((s) => s.dirty);

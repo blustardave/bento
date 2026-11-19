@@ -32,6 +32,8 @@ export interface GridHooks {
   onColumnMenu(c: number, x: number, y: number): void;
   onEditText(text: string | null): void;
   onNotice?(text: string): void;
+  /** Ask a yes/no question (e.g. before overwriting cells). */
+  onConfirm?(title: string, message: string, yes: string): Promise<boolean>;
 }
 
 type Drag =
@@ -40,6 +42,7 @@ type Drag =
   | { kind: "rows" }
   | { kind: "resize"; col: number; startX: number; startW: number }
   | { kind: "fill"; src: Rect }
+  | { kind: "move"; src: Rect; grabR: number; grabC: number }
   | { kind: "freezeRows" }
   | { kind: "freezeCols" };
 
@@ -73,6 +76,8 @@ export class Grid {
   editing: Editing | null = null;
   /** Fill-handle drag: the range it would fill to. */
   private fillTarget: Rect | null = null;
+  /** Drag-to-move: where the selection would land. */
+  private moveTarget: Rect | null = null;
   /** Freeze drag: how many rows/columns would be frozen. */
   private freezePreview: number | null = null;
   private hoverFreeze: "freezeRows" | "freezeCols" | null = null;
@@ -342,7 +347,8 @@ export class Grid {
     const d = this.doc;
     if (!d) { this.spacer.style.width = "1px"; this.spacer.style.height = "1px"; return; }
     // Dusk uses the dark versions of palette colours.
-    this.theme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+    const t = document.documentElement.dataset.theme;
+    this.theme = t === "dusk" ? "dusk" : t === "dark" ? "dark" : "light";
     const n = d.displayCols();
     if (this.xs.length !== n + 1) this.xs = new Float64Array(n + 1);
     let x = 0;
@@ -1102,6 +1108,7 @@ export class Grid {
   }
 
   private drawFillPreview() {
+    if (this.moveTarget) { this.drawMovePreview(this.moveTarget); return; }
     const t = this.fillTarget;
     if (!t) return;
     const ctx = this.ctx;
@@ -1116,6 +1123,101 @@ export class Grid {
     ctx.strokeStyle = this.colors.muted;
     ctx.strokeRect(x0 - 0.5, y0 - 0.5, x1 - x0, y1 - y0);
     ctx.restore();
+  }
+
+  /** Outline where dragged cells will land. */
+  private drawMovePreview(t: Rect) {
+    const ctx = this.ctx;
+    const L = this.lw;
+    const x0 = this.colLeft(t.c0) - L, x1 = this.colLeft(t.c1) + this.cw(t.c1);
+    const y0 = this.rowTop(t.r0) - L, y1 = this.rowTop(t.r1) + this.rowH(t.r1);
+    const T = this.S(2);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(this.rowHeaderWidth(), this.hh, this.w, this.h);
+    ctx.clip();
+    ctx.fillStyle = this.colors.muted;
+    ctx.fillRect(x0, y0, x1 - x0, T);
+    ctx.fillRect(x0, y1 - T, x1 - x0, T);
+    ctx.fillRect(x0, y0, T, y1 - y0);
+    ctx.fillRect(x1 - T, y0, T, y1 - y0);
+    ctx.restore();
+  }
+
+  /** Is the pointer on the edge of the selection (where you grab it to move)? */
+  private onSelectionEdge(x: number, y: number): boolean {
+    const d = this.doc;
+    if (!d || this.editing || d.loading !== null || d.sel.extra?.length) return false;
+    const s = selRect(d.sel);
+    if ((s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1) > 200_000) return false;
+    if (y < this.hh || x < this.rowHeaderWidth()) return false;
+    const x0 = this.colLeft(s.c0), x1 = this.colLeft(s.c1) + this.cw(s.c1);
+    const y0 = this.rowTop(s.r0), y1 = this.rowTop(s.r1) + this.rowH(s.r1);
+    const inX = x >= x0 - 3 && x <= x1 + 3, inY = y >= y0 - 3 && y <= y1 + 3;
+    const nearV = inY && (Math.abs(x - x0) <= 3 || Math.abs(x - x1) <= 3);
+    const nearH = inX && (Math.abs(y - y0) <= 3 || Math.abs(y - y1) <= 3);
+    return (nearV || nearH) && !this.nearFillHandle(x, y);
+  }
+
+  private updateMoveTarget(drag: { src: Rect; grabR: number; grabC: number }, x: number, y: number) {
+    const r = this.rowAt(clamp(y, this.hh, this.h - 1));
+    const c = this.colAt(clamp(x, this.rowHeaderWidth(), this.w - 1));
+    const s = drag.src;
+    const dr = Math.max(-s.r0, r - drag.grabR);
+    const dc = Math.max(-s.c0, c - drag.grabC);
+    this.moveTarget = dr || dc ? { r0: s.r0 + dr, r1: s.r1 + dr, c0: s.c0 + dc, c1: s.c1 + dc } : null;
+  }
+
+  /**
+   * Move (or with Ctrl, copy) a block of cells — values and formatting — as
+   * one undo step. Asks before overwriting existing data, like Excel.
+   */
+  async moveCells(src: Rect, dst: Rect, copy: boolean) {
+    const d = this.doc;
+    if (!d) return;
+    const touches = (m: Rect, r: Rect) => m.r0 <= r.r1 && r.r0 <= m.r1 && m.c0 <= r.c1 && r.c0 <= m.c1;
+    if (this.visibleMerges().some((m) => touches(m, src) || touches(m, dst))) {
+      this.hooks.onNotice?.("Unmerge the cells first to move them");
+      return;
+    }
+    const h = src.r1 - src.r0 + 1, w = src.c1 - src.c0 + 1;
+    const inSrc = (r: number, c: number) => !copy && r >= src.r0 && r <= src.r1 && c >= src.c0 && c <= src.c1;
+    const lastDisp = d.view ? d.view.length - 1 : Infinity;
+    let conflict = false;
+    for (let i = 0; i < h && !conflict; i++) {
+      const tr = dst.r0 + i;
+      if (tr > lastDisp) break;
+      for (let j = 0; j < w; j++) {
+        if (!inSrc(tr, dst.c0 + j) && d.raw(d.dataRow(tr), dst.c0 + j) !== "") { conflict = true; break; }
+      }
+    }
+    if (conflict && this.hooks.onConfirm && !(await this.hooks.onConfirm("Replace existing data?", "There's already data where you're dropping these cells. Replace it?", "Replace"))) return;
+    const cells: CellSet[] = [];
+    const src2: { r: number; c: number; v: string; style: number }[] = [];
+    for (let i = 0; i < h; i++) {
+      const sr = d.dataRow(src.r0 + i);
+      for (let j = 0; j < w; j++) src2.push({ r: sr, c: src.c0 + j, v: d.raw(sr, src.c0 + j), style: d.styleId(sr, src.c0 + j) });
+    }
+    if (!copy) for (const s of src2) cells.push({ r: s.r, c: s.c, v: "", style: 0 });
+    for (let i = 0; i < h; i++) {
+      const disp = dst.r0 + i;
+      if (disp > lastDisp) break;
+      const tr = d.dataRow(disp);
+      for (let j = 0; j < w; j++) {
+        const s = src2[i * w + j];
+        const tc = dst.c0 + j;
+        // Copies shift relative references, like paste; moves keep formulas exactly as they were.
+        const v = copy ? offsetFormula(s.v, tr - s.r, tc - s.c) : s.v;
+        cells.push({ r: tr, c: tc, v, style: s.style });
+      }
+    }
+    d.setCells(cells, copy ? "Copy cells" : "Move cells");
+    const sel = d.sel;
+    this.select({
+      ar: sel.ar + (dst.r0 - src.r0), ac: sel.ac + (dst.c0 - src.c0),
+      fr: sel.fr + (dst.r0 - src.r0), fc: sel.fc + (dst.c0 - src.c0),
+    });
+    this.hooks.onChange();
   }
 
   /** Work out the fill range from the pointer, like Sheets: pick the axis you've dragged further along. */
@@ -1311,7 +1413,10 @@ export class Grid {
     const e = this.editing;
     const d = this.doc;
     if (!e || !d) return;
-    const v = this.editor.value;
+    let v = this.editor.value;
+    // Accepting a suggestion takes the existing entry's exact spelling and case.
+    const ac = this.ac;
+    if (ac && v.toLowerCase() === ac.entry.toLowerCase()) v = ac.entry;
     this.stopEdit();
     const r = d.dataRow(e.r);
     if (d.raw(r, e.c) !== v) {
@@ -1327,7 +1432,74 @@ export class Grid {
     this.hooks.onSelection();
   }
 
+  /* ---------------------------- autocomplete ---------------------------- */
+
+  /** The suggestion currently showing (as selected text after the caret). */
+  private ac: { entry: string; typed: number } | null = null;
+  private acIndex: { key: string; map: Map<string, string> } | null = null;
+
+  /** Distinct text values in the column being edited (lower-case → as written). */
+  private columnEntries(): Map<string, string> {
+    const d = this.doc!, e = this.editing!;
+    const key = `${d.id}:${d.version}:${e.c}:${d.dataRow(e.r)}`;
+    if (this.acIndex?.key === key) return this.acIndex.map;
+    const map = new Map<string, string>();
+    const me = d.dataRow(e.r);
+    const n = d.rows.length;
+    // Look outwards from the cell so huge sheets stay quick.
+    for (let k = 1; k <= Math.min(n, 20_000) && map.size < 5_000; k++) {
+      for (const r of [me - k, me + k]) {
+        if (r < 0 || r >= n) continue;
+        const v = d.rows[r][e.c];
+        if (!v || v.length < 2 || v.charCodeAt(0) === 61 || v.includes("\n") || !Number.isNaN(parseNum(v))) continue;
+        const low = v.toLowerCase();
+        if (!map.has(low)) map.set(low, v);
+      }
+    }
+    this.acIndex = { key, map };
+    return map;
+  }
+
+  /**
+   * Excel-style autocomplete, kept polite: text only (never numbers or
+   * formulas), at least two characters typed, and only when exactly one
+   * existing entry in the column starts that way. The rest of the entry
+   * appears selected, so typing simply carries on over it; Backspace or Esc
+   * removes it, Enter or Tab accepts it.
+   */
+  private autocomplete(e: InputEvent) {
+    this.ac = null;
+    if (localStorage.getItem("bento.autocomplete") === "off" || e.isComposing || !this.editing) return;
+    if (!e.inputType?.startsWith("insert") || e.inputType === "insertLineBreak") return;
+    const ed = this.editor;
+    const text = ed.value;
+    if (ed.selectionStart !== text.length || text.length < 2 || text.startsWith("=") || text.includes("\n")) return;
+    if (!Number.isNaN(parseNum(text))) return;
+    const low = text.toLowerCase();
+    let match: string | null = null;
+    for (const [k, v] of this.columnEntries()) {
+      if (!k.startsWith(low)) continue;
+      if (match !== null || k.length === low.length) return; // ambiguous, or already complete
+      match = v;
+    }
+    if (!match) return;
+    ed.value = text + match.slice(text.length);
+    ed.setSelectionRange(text.length, match.length);
+    this.ac = { entry: match, typed: text.length };
+  }
+
+  /** Esc with a suggestion showing removes just the suggestion. */
+  private dismissSuggestion(): boolean {
+    const ac = this.ac;
+    if (!ac || this.editor.selectionEnd !== this.editor.value.length || this.editor.selectionStart === this.editor.selectionEnd) return false;
+    this.editor.value = this.editor.value.slice(0, this.editor.selectionStart);
+    this.ac = null;
+    this.hooks.onEditText(this.editor.value);
+    return true;
+  }
+
   private stopEdit() {
+    this.ac = null;
     this.editing = null;
     this.editor.style.display = "none";
     this.hooks.onEditText(null);
@@ -1596,7 +1768,7 @@ export class Grid {
       this.hooks.onEditText(t.value);
     }
     else if (e.key === "Tab") { e.preventDefault(); this.commitEdit(0, e.shiftKey ? -1 : 1); }
-    else if (e.key === "Escape") { e.preventDefault(); this.cancelEdit(); }
+    else if (e.key === "Escape") { e.preventDefault(); if (!this.dismissSuggestion()) this.cancelEdit(); }
     else if (replace && !e.shiftKey && !this.editor.value.startsWith("=")) {
       const dir: Record<string, [number, number]> = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
       const m = dir[e.key];
@@ -1650,6 +1822,16 @@ export class Grid {
         this.invalidate();
         return;
       }
+      if (this.onSelectionEdge(x, y)) {
+        const s = selRect(d.sel);
+        this.drag = { kind: "move", src: s, grabR: clamp(this.rowAt(y), s.r0, s.r1), grabC: clamp(this.colAt(x), s.c0, s.c1) };
+        this.moveTarget = null;
+        sc.setPointerCapture(e.pointerId);
+        sc.style.cursor = "grabbing";
+        this.pointer = { x, y };
+        this.startAutoScroll();
+        return;
+      }
       const rcFirst = y < this.hh ? this.resizeColAt(x, y) : -1;
       const fz = rcFirst < 0 ? this.freezeHit(x, y) : null;
       if (fz) {
@@ -1693,6 +1875,7 @@ export class Grid {
         return;
       }
       if (drag?.kind === "fill") { this.updateFillTarget(drag.src, x, y); this.invalidate(); return; }
+      if (drag?.kind === "move") { this.updateMoveTarget(drag, x, y); this.invalidate(); return; }
       if (drag?.kind === "freezeRows" || drag?.kind === "freezeCols") {
         this.freezePreview = this.freezeCountAt(drag.kind, x, y);
         this.invalidate();
@@ -1703,7 +1886,8 @@ export class Grid {
       const rc = this.resizeColAt(x, y);
       const fz = rc < 0 || y >= this.hh ? this.freezeHit(x, y) : null;
       const onFill = this.nearFillHandle(x, y);
-      sc.style.cursor = onFill ? "crosshair" : fz ? "grab" : rc >= 0 ? "col-resize" : "default";
+      const onEdge = !onFill && !fz && rc < 0 && this.onSelectionEdge(x, y);
+      sc.style.cursor = onFill ? "crosshair" : onEdge ? "move" : fz ? "grab" : rc >= 0 ? "col-resize" : "default";
       if (fz !== this.hoverFreeze) { this.hoverFreeze = fz; this.invalidate(); }
       const hc = y < this.hh && x >= this.rowHeaderWidth() ? this.colAt(x) : -1;
       const chev = hc >= 0 && rc < 0 && x > this.colLeft(hc) + this.cw(hc) - 24 && this.cw(hc) > 44;
@@ -1717,6 +1901,14 @@ export class Grid {
     const end = (e: PointerEvent) => {
       const drag = this.drag;
       if (drag?.kind === "resize") { this.doc?.remeasureAll(); this.hooks.onChange(); }
+      if (drag?.kind === "move") {
+        const t = this.moveTarget;
+        this.moveTarget = null;
+        this.drag = null;
+        sc.style.cursor = "default";
+        if (t && e.type === "pointerup") this.moveCells(drag.src, t, e.ctrlKey || e.metaKey);
+        this.invalidate();
+      }
       if (drag?.kind === "fill") {
         const t = this.fillTarget;
         this.fillTarget = null;
@@ -1792,7 +1984,8 @@ export class Grid {
     });
 
     this.editor.addEventListener("keydown", (e) => this.onEditorKey(e));
-    this.editor.addEventListener("input", () => {
+    this.editor.addEventListener("input", (e) => {
+      this.autocomplete(e as InputEvent);
       this.placeEditor();
       this.hooks.onEditText(this.editor.value);
     });
@@ -1860,6 +2053,7 @@ export class Grid {
       if (dx || dy) {
         this.setScroll(d.scrollX + dx, d.scrollY + dy);
         if (this.drag.kind === "fill") this.updateFillTarget(this.drag.src, x, y);
+        else if (this.drag.kind === "move") this.updateMoveTarget(this.drag, x, y);
         else this.dragTo(x, y);
       }
       this.autoScroll = requestAnimationFrame(tick);

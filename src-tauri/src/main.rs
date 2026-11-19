@@ -39,6 +39,41 @@ fn write_file(request: Request<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Bento's private folder for crash-recovery copies (created if missing).
+#[tauri::command]
+fn recovery_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("recovery");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Names of the files in a folder (used only for the recovery folder).
+#[tauri::command]
+fn list_dir(path: String) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            out.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    Ok(out)
+}
+
+/// Delete a recovery copy. Missing files are fine.
+#[tauri::command]
+fn remove_file(path: String) -> Result<(), String> {
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Files passed on the command line (e.g. via "Open with" / double-click).
 #[tauri::command]
 fn launch_files() -> Vec<String> {
@@ -102,7 +137,14 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![read_file, write_file, launch_files])
+        .invoke_handler(tauri::generate_handler![
+            read_file,
+            write_file,
+            launch_files,
+            recovery_dir,
+            list_dir,
+            remove_file
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Bento");
 }

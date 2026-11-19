@@ -12,10 +12,11 @@ import {
 import { MenuItem, closeMenus, modal, showMenu, toast } from "./ui";
 import { ToolButton, divider, grow, toolButton } from "./toolbar";
 import { ZOOMS } from "./grid";
+import { AutoSaver, RecoveredFile, autoSaveEnabled } from "./autosave";
 import { FormatBar } from "./formatbar";
 import { CURRENCIES, Style, detectCurrency } from "./format";
 import { appVersion, initUpdater } from "./updater";
-import { basename, cellName, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
+import { basename, cellName, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 
 type Theme = "system" | "light" | "dusk" | "dark";
 const $ = (id: string) => document.getElementById(id)!;
@@ -37,7 +38,7 @@ export class App {
       return { style: d.style(r, d.sel.ac), header: d.freezeHeader && r === 0, shown: d.display(r, d.sel.ac) };
     },
     apply: (patch, label) => this.applyFormat(patch, label),
-    theme: () => (document.documentElement.dataset.theme === "light" ? "light" : "dark"),
+    theme: () => { const t = document.documentElement.dataset.theme; return t === "dusk" ? "dusk" : t === "dark" ? "dark" : "light"; },
     toggleMerge: () => this.toggleMerge(),
     selectionMerged: () => {
       const d = this.active;
@@ -47,6 +48,11 @@ export class App {
     },
   });
   private zoomInput!: HTMLInputElement;
+  private autosaver = new AutoSaver(
+    () => this.docs.map((d) => d.book),
+    (b) => encodeBento(b),
+    (b) => this.saveQuietly(b),
+  );
 
   constructor() {
     this.grid = new Grid({
@@ -55,6 +61,7 @@ export class App {
       onContextMenu: (zone, x, y) => this.contextMenu(zone, x, y),
       onColumnMenu: (c, x, y) => this.columnMenu(c, x, y),
       onNotice: (t) => toast(t),
+      onConfirm: async (title, message, yes) => !!(await modal(title, message, [{ label: "Cancel", value: false }, { label: yes, value: true, primary: true }])),
       onEditText: (t) => { if (document.activeElement !== this.cellInput) this.cellInput.value = t ?? this.activeRaw(); },
     });
     this.find = new FindPanel(this.grid, () => this.active, () => this.onChange());
@@ -68,6 +75,8 @@ export class App {
   }
 
   private async startup() {
+    await this.autosaver.start();
+    this.offerRecovery();
     onFileDrop(
       (s) => ($("drop-hint").hidden = s !== "over"),
       (files) => this.open(files),
@@ -226,6 +235,9 @@ export class App {
 
   async closeDoc(doc: Doc): Promise<boolean> {
     if (this.grid.editing && this.active === doc) this.grid.commitEdit();
+    if (doc.book.dirty && this.autosaver.canAutoSave(doc.book)) {
+      if (!(await this.saveQuietly(doc.book))) return false;
+    }
     if (doc.book.dirty) {
       if (this.active !== doc) this.activate(doc);
       const choice = await modal(`Save changes to ${doc.name}?`, "Your changes will be lost if you don't save them.", [
@@ -236,6 +248,7 @@ export class App {
       if (choice === null || choice === "cancel") return false;
       if (choice === "save" && !(await this.save(doc))) return false;
     }
+    this.autosaver.discard(doc.book.id);
     this.removeDoc(doc);
     return true;
   }
@@ -245,7 +258,70 @@ export class App {
       if (!d.book.dirty) continue;
       if (!(await this.closeDoc(d))) return false;
     }
+    // A clean exit leaves nothing to recover.
+    for (const d of this.docs) await this.autosaver.discard(d.book.id);
     return true;
+  }
+
+  /** AutoSave: write a .bento back to where it lives, without any fuss. */
+  private async saveQuietly(book: Book): Promise<boolean> {
+    if (!book.path || !isBentoPath(book.path)) return false;
+    if (this.grid.editing && this.active?.book === book) return false; // wait until the edit is committed
+    try {
+      const token = book.token;
+      await writeFile(book.path, await encodeBento(book));
+      // Only mark saved if nothing changed while writing.
+      if (book.token === token) book.markSaved();
+      this.render();
+      return true;
+    } catch (e) {
+      console.warn("AutoSave couldn't write", e);
+      return false;
+    }
+  }
+
+  /** After a crash: offer back any recovery copies that were left behind. */
+  private async offerRecovery() {
+    const found = await this.autosaver.leftovers();
+    if (!found.length) return;
+    const names = found.slice(0, 5).map((f) => `•  ${f.name}  (${new Date(f.savedAt).toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })})`).join("\n");
+    const more = found.length > 5 ? `\n…and ${found.length - 5} more` : "";
+    const choice = await modal(
+      "Recover unsaved work?",
+      `Bento didn't close properly last time. These had changes that weren't saved:\n\n${names}${more}`,
+      [
+        { label: "Discard", value: "discard" },
+        { label: "Recover", value: "recover", primary: true },
+      ],
+    );
+    if (choice === "recover") {
+      for (const f of found) await this.restore(f);
+    } else if (choice === "discard") {
+      for (const f of found) await this.autosaver.discard(f.id);
+    }
+  }
+
+  private async restore(f: RecoveredFile) {
+    const doc = this.makeDoc(f.name, f.path);
+    const book = doc.book;
+    book.id = f.id; // keep updating the same recovery copy until it's saved
+    if (f.path) book.source = { name: f.name, path: f.path };
+    try {
+      await decodeBento(f.bytes, book, (name) => this.makeSheet(book, name));
+    } catch {
+      await this.autosaver.discard(f.id);
+      return;
+    }
+    for (const sh of book.sheets) {
+      sh.loading = null;
+      if (!sh.widths.size) this.grid.autoFitInitial(sh);
+      sh.remeasureAll();
+    }
+    book.structureDirty = true; // recovered work counts as unsaved
+    const blank = this.active && !this.active.path && !this.active.book.dirty && this.active.rows.length === 0 ? this.active : null;
+    if (blank) this.docs.splice(this.docs.indexOf(blank), 1, book.sheet);
+    else this.docs.push(book.sheet);
+    this.activate(book.sheet);
   }
 
   /** Save as a .bento sheet (keeps formatting, formulas, widths…). */
@@ -266,6 +342,8 @@ export class App {
       doc.name = basename(path);
       if (isTauri) doc.source = { name: doc.name, path };
       doc.book.markSaved();
+      this.autosaver.discard(doc.book.id);
+      this.autosaver.settled(doc.book);
       this.addRecent(path);
       this.render();
       toast(`Saved ${doc.name}`);
@@ -653,14 +731,16 @@ export class App {
 
   private onSelection() {
     const d = this.active;
-    if (!d) { $("cell-name").textContent = ""; this.cellInput.value = ""; return; }
+    const nameBox = $("cell-name") as HTMLInputElement;
+    if (!d) { nameBox.value = ""; this.cellInput.value = ""; return; }
     const s = selRect(d.sel);
     const name = (r: number, c: number) => cellName(d.dataRow(r), c);
-    $("cell-name").textContent = s.r0 === s.r1 && s.c0 === s.c1
+    const label = s.r0 === s.r1 && s.c0 === s.c1
       ? name(d.sel.ar, d.sel.ac)
       : this.grid.isWholeCols(s) ? (s.c0 === s.c1 ? colName(s.c0) : `${colName(s.c0)}:${colName(s.c1)}`)
       : this.grid.isWholeRows(s) ? (s.r0 === s.r1 ? `${d.dataRow(s.r0) + 1}` : `${d.dataRow(s.r0) + 1}:${d.dataRow(s.r1) + 1}`)
       : `${name(s.r0, s.c0)}:${name(s.r1, s.c1)}`;
+    if (document.activeElement !== nameBox) nameBox.value = label;
     if (!this.grid.editing && document.activeElement !== this.cellInput) this.cellInput.value = this.activeRaw();
     this.renderStats();
     this.refreshToolbar();
@@ -898,7 +978,7 @@ export class App {
       "sep",
       { label: "Preferences…", key: "Ctrl+,", action: () => this.preferences() },
       { label: "Keyboard shortcuts", key: "F1", action: () => this.shortcuts() },
-      { label: "About Bento", action: async () => modal("Bento", `Version ${await appVersion()}\nA minimal, fast CSV editor.\nUpdates install automatically.`, [{ label: "Close", value: true, primary: true }]) },
+      { label: "About Bento", action: async () => modal("Bento", `Version ${await appVersion()}\nA minimal, fast CSV editor.\nUpdates install automatically.\nAutoSave is ${autoSaveEnabled() ? "on" : "off"} (Preferences).`, [{ label: "Close", value: true, primary: true }]) },
     ];
     showMenu(items, r.left, r.bottom + 4, () => btn.classList.remove("open"));
   }
@@ -918,10 +998,18 @@ export class App {
     for (const [sym, name] of CURRENCIES) sel.append(el("option", { value: sym, text: `${sym.trim()}  ${name}` }));
     sel.value = localStorage.getItem("bento.currency") ?? "auto";
     const done = el("button", { class: "btn primary", text: "Done" });
+    const toggle = (key: string, label: string, hint: string, onByDefault = true) => {
+      const cb = el("input", { type: "checkbox" });
+      cb.checked = onByDefault ? localStorage.getItem(key) !== "off" : localStorage.getItem(key) === "on";
+      cb.addEventListener("change", () => localStorage.setItem(key, cb.checked ? "on" : "off"));
+      return el("label", { class: "pref-check" }, cb, el("span", {}, el("b", { text: label }), el("small", { text: hint })));
+    };
     const box = el("div", { class: "modal prefs", role: "dialog" },
       el("h3", { text: "Preferences" }),
       el("label", { class: "pref" }, el("span", { text: "Default currency" }), sel),
       el("p", { class: "hint", text: "Used by the currency button in the toolbar." }),
+      toggle("bento.autosave", "AutoSave", "Saved .bento files save themselves as you work. CSVs are never overwritten; unsaved work is always kept safe for recovery."),
+      toggle("bento.autocomplete", "Autocomplete", "Suggest matching text from the same column as you type. Enter or Tab accepts; keep typing to ignore."),
       el("div", { class: "foot" }, done),
     );
     const scrim = el("div", { class: "scrim" }, box);
@@ -948,6 +1036,7 @@ export class App {
       "Ctrl+S  save (.bento)  ·  Ctrl+E  export CSV  ·  Ctrl+O  open  ·  Ctrl+N  new",
       "Ctrl+Tab  next file  ·  Ctrl+PgDn / PgUp  next sheet  ·  Ctrl+W  close",
       "Ctrl+Alt+−  delete selected rows/columns  ·  Ctrl+Shift+F  hide toolbar",
+      "Ctrl+G  go to a cell, range or sheet  ·  drag a selection's edge to move it (Ctrl copies)",
       "Formulas start with =, e.g. =SUM(B2:B100)",
     ].join("\n"), [{ label: "Done", value: true, primary: true }]);
   }
@@ -1107,7 +1196,69 @@ export class App {
     if (!isTauri) ($("titlebar").querySelector(".winctl") as HTMLElement).style.display = "none";
   }
 
+  /**
+   * Go To: jump to "B12", "A1:C9", "C" or "C:E" (columns), "12" or "3:8"
+   * (rows), optionally prefixed by a sheet ("Totals!A1"), or just a sheet name.
+   */
+  private goTo(text: string): boolean {
+    let t = text.trim();
+    let d = this.active;
+    if (!d || !t) return false;
+    const bang = t.lastIndexOf("!");
+    const findSheet = (n: string) => d!.book.sheets.find((x) => x.sheetName.toLowerCase() === n.toLowerCase());
+    if (bang > 0) {
+      const target = findSheet(t.slice(0, bang).replace(/^'(.*)'$/, "$1"));
+      if (!target) return false;
+      if (target !== d) { this.showSheet(target); d = target; }
+      t = t.slice(bang + 1);
+    } else {
+      const target = findSheet(t);
+      if (target && !/^[A-Za-z]{1,3}\d*$/.test(t)) { if (target !== d) this.showSheet(target); return true; }
+    }
+    const up = t.toUpperCase().replace(/\$/g, "");
+    const R = this.grid.fullRow(), C = this.grid.fullCol();
+    const row = (n: string) => { const r = d!.displayRow(Number(n) - 1); return r; };
+    let m: RegExpExecArray | null;
+    let sel: { ar: number; ac: number; fr: number; fc: number } | null = null;
+    if ((m = /^([A-Z]{1,3})(\d+)(?::([A-Z]{1,3})(\d+))?$/.exec(up))) {
+      const r0 = row(m[2]), r1 = m[4] ? row(m[4]) : r0;
+      if (r0 < 0 || r1 < 0) { toast("That row is hidden by a filter"); return true; }
+      sel = { ar: r0, ac: colIndex(m[1]), fr: r1, fc: m[3] ? colIndex(m[3]) : colIndex(m[1]) };
+    } else if ((m = /^([A-Z]{1,3})(?::([A-Z]{1,3}))?$/.exec(up))) {
+      sel = { ar: 0, ac: colIndex(m[1]), fr: R, fc: m[2] ? colIndex(m[2]) : colIndex(m[1]) };
+    } else if ((m = /^(\d+)(?::(\d+))?$/.exec(up))) {
+      const r0 = row(m[1]), r1 = m[2] ? row(m[2]) : r0;
+      if (r0 < 0 || r1 < 0) { toast("That row is hidden by a filter"); return true; }
+      sel = { ar: r0, ac: 0, fr: r1, fc: C };
+    }
+    if (!sel || Number.isNaN(sel.ar)) return false;
+    this.grid.select(sel);
+    return true;
+  }
+
+  private bindNameBox() {
+    const box = $("cell-name") as HTMLInputElement;
+    box.addEventListener("focus", () => box.select());
+    // A click would otherwise drop the caret and undo the select-all.
+    box.addEventListener("mouseup", (e) => { if (box.selectionStart === box.selectionEnd) { e.preventDefault(); box.select(); } });
+    box.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (this.goTo(box.value)) { box.blur(); this.grid.focus(); this.onSelection(); }
+        else { toast(`Couldn't find "${box.value.trim()}"`); box.select(); }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        box.blur();
+        this.grid.focus();
+        this.onSelection();
+      }
+    });
+    box.addEventListener("blur", () => this.onSelection());
+  }
+
   private bindCellBar() {
+    this.bindNameBox();
     const input = this.cellInput;
     input.addEventListener("input", () => {
       if (!this.active) return;
@@ -1175,6 +1326,7 @@ export class App {
       else if (ctrl && !e.altKey && e.key === "-") { e.preventDefault(); this.stepZoom(-1); }
       else if (ctrl && e.key === "0") { e.preventDefault(); this.setZoom(1); }
       else if (e.key === "F1") { e.preventDefault(); this.shortcuts(); }
+      else if ((ctrl && k === "g") || e.key === "F5") { e.preventDefault(); if (d) { const nb = $("cell-name") as HTMLInputElement; nb.focus(); nb.select(); } }
       else if (ctrl && (e.key === "PageDown" || e.key === "PageUp") && d) {
         e.preventDefault();
         const sh = d.book.sheets, i = sh.indexOf(d);

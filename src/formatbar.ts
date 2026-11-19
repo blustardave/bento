@@ -11,7 +11,7 @@ export interface FormatContext {
   /** Style of the active cell (and whether it's in the frozen header row). */
   active(): { style: Style; header: boolean; shown: string } | null;
   apply(patch: (s: Style) => Style, label: string): void;
-  theme(): "light" | "dark";
+  theme(): "light" | "dark" | "dusk";
   /** Merge the selection, or unmerge it if it already holds merges. */
   toggleMerge(): void;
   selectionMerged(): boolean;

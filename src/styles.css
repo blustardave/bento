@@ -17,9 +17,9 @@
   --line-strong: #d8d5ca;
   --text: #1f1e1d;
   --text-2: #5e5d58;
-  --muted: #8f8d85;
+  --muted: #85837b;
   --accent: #d97757;
-  --accent-text: #bd5d3c;
+  --accent-text: #b4553a;
   --accent-soft: rgba(217, 119, 87, 0.1);
   --accent-softer: rgba(217, 119, 87, 0.06);
   --sel-fill: rgba(217, 119, 87, 0.065);
@@ -43,7 +43,7 @@
   --line-strong: #6d6a63;
   --text: #f4f2eb;
   --text-2: #dcd9d0;
-  --muted: #b3afa5;
+  --muted: #c2beb4;
   --accent: #ec9e81;
   --accent-text: #f5b39b;
   --accent-soft: rgba(236, 158, 129, 0.2);
@@ -259,17 +259,32 @@ input, textarea { font: inherit; color: inherit; }
   border-bottom: 1px solid var(--line);
   background: var(--bg);
 }
-#cell-name {
+#cell-name-box {
   width: 86px;
-  padding: 0 12px 0 14px;
-  color: var(--text-2);
-  font-variant-numeric: tabular-nums;
+  padding: 0 8px 0 9px;
   height: 100%;
   display: flex; align-items: center;
   position: relative;
+  flex: none;
 }
+/* The name box doubles as Go To: it looks like plain text until you use it. */
+#cell-name {
+  width: 100%;
+  height: 24px;
+  border: 0; outline: 0;
+  border-radius: 5px;
+  padding: 0 5px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+  transition: background var(--ease), box-shadow var(--ease);
+}
+#cell-name:hover { background: var(--surface); }
+#cell-name:focus { background: var(--bg); color: var(--text); box-shadow: inset 0 0 0 1.5px var(--accent); }
 /* Short divider, matching the ones in the toolbar. */
-#cell-name::after {
+#cell-name-box::after {
   content: "";
   position: absolute;
   right: 0; top: 50%;
@@ -770,7 +785,9 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 
 /* ---------------------------- status bar v2 ---------------------------- */
 
-#status { height: 30px; padding: 0 6px 0 4px; }
+#status { height: 34px; padding: 0 6px 0 4px; align-items: stretch; }
+#status-left, #status-right { align-self: stretch; }
+#status-right { align-items: center; }
 #status-left { gap: 1px; min-width: 0; flex: 1; }
 #status-right { gap: 2px; flex: none; }
 #status-stats, #status-dims { display: flex; align-items: center; gap: 2px; }
@@ -778,7 +795,7 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 #status .item.accent { color: var(--accent-text); }
 
 .sheet-btn {
-  width: 26px; height: 22px; flex: none;
+  width: 28px; height: 26px; flex: none; align-self: center;
   display: grid; place-items: center;
   border-radius: 5px;
   color: var(--muted);
@@ -786,28 +803,31 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 }
 .sheet-btn:hover { background: var(--surface-2); color: var(--text); }
 .sheet-btn svg, .sheet-tab svg, #toolbar-toggle svg { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; display: block; }
-.sheet-tabs { display: flex; align-items: center; gap: 1px; margin-left: 6px; min-width: 0; overflow: hidden; }
+.sheet-tabs { display: flex; align-items: stretch; align-self: stretch; gap: 0; margin-left: 6px; min-width: 0; overflow: hidden; }
+/* Tabs run the full height of the bar with square sides; the active one
+   takes the sheet's colour, so it reads as part of the sheet above. */
 .sheet-tab {
-  height: 22px; flex: none;
-  display: inline-flex; align-items: center; gap: 2px;
-  padding: 0 10px;
-  border-radius: 5px;
-  font-size: 12px; line-height: 1;
+  flex: none;
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 0 14px;
+  margin-top: -1px; /* cover the bar's top border */
+  border-radius: 0;
+  font-size: 13px; line-height: 1;
   color: var(--text-2);
-  max-width: 180px;
+  max-width: 200px;
   transition: background var(--ease), color var(--ease);
 }
-.sheet-tab .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 14px; }
+.sheet-tab .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 16px; height: 16px; }
 .sheet-tab:hover { background: var(--surface-2); color: var(--text); }
-.sheet-tab.active { background: var(--bg); color: var(--accent-text); font-weight: 600; padding-right: 4px; }
+.sheet-tab.active { background: var(--bg); color: var(--accent-text); font-weight: 600; padding-right: 8px; }
 .sheet-tab .caret { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 4px; opacity: 0.7; }
 .sheet-tab .caret:hover { opacity: 1; background: var(--surface-2); }
 .sheet-rename {
-  height: 22px; width: 120px;
+  height: 26px; width: 130px; align-self: center; margin-left: 2px;
   border: 0; outline: 0;
   border-radius: 5px;
   padding: 0 8px;
-  font: 600 12px var(--font-ui);
+  font: 600 13px var(--font-ui);
   color: var(--text);
   background: var(--bg);
   box-shadow: inset 0 0 0 1.5px var(--accent);
@@ -819,4 +839,21 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 #toolbar-toggle { width: 26px; height: 26px; margin-right: 4px; }
 #toolbar-toggle svg { transition: transform var(--ease); }
 #toolbar-toggle.flipped svg { transform: rotate(180deg); }
-.toolbar-hidden #toolbar { display: none; }
+/* Folding: the toolbar slides shut (height + fade), the grid follows. */
+#toolbar {
+  transition: height 160ms cubic-bezier(0.2, 0, 0, 1), opacity 120ms ease, border-color 160ms ease;
+  overflow-y: hidden;
+}
+.toolbar-hidden #toolbar {
+  height: 0;
+  opacity: 0;
+  border-bottom-width: 0;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) { #toolbar { transition: none; } }
+
+.modal.prefs .pref-check { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 14px; cursor: default; }
+.modal.prefs .pref-check input { margin-top: 3px; }
+.modal.prefs .pref-check span { display: flex; flex-direction: column; gap: 2px; }
+.modal.prefs .pref-check b { font-weight: 500; color: var(--text); }
+.modal.prefs .pref-check small { color: var(--muted); font-size: 12px; line-height: 1.4; }
