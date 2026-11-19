@@ -3,6 +3,7 @@
 
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{Emitter, Manager};
+use tauri_plugin_window_state::StateFlags;
 
 /// Read a file and hand the raw bytes to the UI (decoding happens there).
 #[tauri::command]
@@ -82,7 +83,25 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Reopen at the size/position (and maximised state) it was closed at.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Visibility isn't restored: the window starts hidden and the UI shows
+        // it once it's in place and painted, so it never jumps or flashes.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        )
+        .setup(|app| {
+            // Safety net: if the UI somehow never loads, show the window anyway.
+            if let Some(w) = app.get_webview_window("main") {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    if !w.is_visible().unwrap_or(true) {
+                        let _ = w.show();
+                    }
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![read_file, write_file, launch_files])
         .run(tauri::generate_context!())
         .expect("error while running Bento");

@@ -119,6 +119,8 @@ export const windowControls = {
   async toggleMaximize() { if (isTauri) (await win()).toggleMaximize(); },
   async close() { if (isTauri) (await win()).close(); },
   async destroy() { if (isTauri) (await win()).destroy(); },
+  /** Reveal the window (it starts hidden so it can open already in place). */
+  async show() { if (isTauri) { const w = await win(); await w.show(); await w.setFocus(); } },
   async setTitle(t: string) { if (isTauri) (await win()).setTitle(t); else document.title = t; },
   async isMaximized() { return isTauri ? (await win()).isMaximized() : false; },
   async onResized(cb: () => void) { if (isTauri) (await win()).onResized(cb); },
@@ -138,7 +140,7 @@ export const windowControls = {
         if (await cb()) {
           try {
             const { saveWindowState, StateFlags } = await import("@tauri-apps/plugin-window-state");
-            await saveWindowState(StateFlags.ALL);
+            await saveWindowState(StateFlags.SIZE | StateFlags.POSITION | StateFlags.MAXIMIZED);
           } catch (err) { console.warn(err); }
           (await win()).destroy();
         }

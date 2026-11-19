@@ -9,6 +9,10 @@ window.addEventListener("contextmenu", (e) => {
   if (!(t instanceof HTMLInputElement || (t instanceof HTMLTextAreaElement && t.id === "editor"))) e.preventDefault();
 });
 
+import { windowControls } from "./native";
+
 const app = new App();
+// Show the window only after the first frame is painted, at its restored size.
+requestAnimationFrame(() => requestAnimationFrame(() => { windowControls.show(); }));
 // Handy for debugging in the dev tools console.
 (window as unknown as { bento: App }).bento = app;
