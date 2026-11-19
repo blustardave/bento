@@ -33,7 +33,7 @@ interface CellChange { r: number; c: number; before: string; after: string }
 const MAX_UNDO = 300;
 let nextId = 1;
 
-export const DEFAULT_WIDTH = 120;
+export const DEFAULT_WIDTH = 100;
 
 export class Doc {
   readonly id = nextId++;

@@ -188,7 +188,9 @@ input, textarea { font: inherit; color: inherit; }
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 0 8px;
+  /* 5px + the button's inset puts the first icon on the same left
+     edge as the cell name below it. */
+  padding: 0 8px 0 5px;
   background: var(--bg);
   border-bottom: 1px solid var(--line);
 }
@@ -205,7 +207,7 @@ input, textarea { font: inherit; color: inherit; }
 #toolbar .tb:hover:not(:disabled), #toolbar .tb.open { background: var(--surface); color: var(--text); }
 #toolbar .tb:disabled { opacity: 0.35; }
 #toolbar .tb.on { color: var(--accent-text); background: var(--accent-soft); }
-#toolbar .tb .txt { font-size: 12px; font-variant-numeric: tabular-nums; }
+#toolbar .tb .txt { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 #toolbar .tb .caret { width: 8px; height: 8px; opacity: 0.7; }
 #toolbar .div { width: 1px; height: 18px; background: var(--line-strong); margin: 0 6px; flex: none; }
 #toolbar .grow { flex: 1; }
@@ -224,13 +226,22 @@ input, textarea { font: inherit; color: inherit; }
   background: var(--bg);
 }
 #cell-name {
-  width: 84px;
-  padding: 0 12px;
+  width: 86px;
+  padding: 0 12px 0 14px;
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
-  border-right: 1px solid var(--line);
   height: 100%;
   display: flex; align-items: center;
+  position: relative;
+}
+/* Short divider, matching the ones in the toolbar. */
+#cell-name::after {
+  content: "";
+  position: absolute;
+  right: 0; top: 50%;
+  width: 1px; height: 18px;
+  margin-top: -9px;
+  background: var(--line-strong);
 }
 .fx { color: var(--muted); font-style: italic; font-family: var(--font-serif); padding: 0 10px; }
 #cell-input {
