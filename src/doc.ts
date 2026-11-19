@@ -55,6 +55,10 @@ export class Doc {
   book: Book;
   /** This sheet's own name (shown on the tab at the bottom). */
   sheetName = "Sheet1";
+  /** Tab colour (palette token or hex), if any. */
+  tabColor: string | undefined;
+  /** Protected sheets can't be renamed or deleted. */
+  protected = false;
   get name(): string { return this.book.name; }
   set name(v: string) { this.book.name = v; }
   get path(): string | null { return this.book.path; }

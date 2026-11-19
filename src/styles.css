@@ -857,3 +857,43 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .modal.prefs .pref-check span { display: flex; flex-direction: column; gap: 2px; }
 .modal.prefs .pref-check b { font-weight: 500; color: var(--text); }
 .modal.prefs .pref-check small { color: var(--muted); font-size: 12px; line-height: 1.4; }
+
+/* ------------------------ sheet tabs: drag, colour ------------------------ */
+
+.sheet-tabs { position: relative; }
+.sheet-tab { cursor: grab; }
+.sheet-tab .caret { cursor: default; }
+.sheet-tab.dragging { opacity: 0.55; }
+body.grabbing, body.grabbing * { cursor: grabbing !important; }
+.sheet-drop {
+  position: absolute; top: 6px; bottom: 6px;
+  width: 2px; border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.sheet-tab .lock { display: grid; place-items: center; opacity: 0.6; margin-right: 1px; }
+.sheet-tab .lock svg { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; display: block; }
+.sheet-tab.coloured { color: var(--text); }
+.sheet-tab.coloured:hover { filter: brightness(0.97); }
+[data-theme="dark"] .sheet-tab.coloured:hover, [data-theme="dusk"] .sheet-tab.coloured:hover { filter: brightness(1.1); }
+.sheet-tab.coloured.active { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* ---------------------- round hover for small "add" buttons ---------------------- */
+
+#new-tab, .sheet-btn, #check-btn { border-radius: 50%; width: 28px; height: 28px; }
+.sheet-btn { width: 26px; height: 26px; }
+
+/* ---------------------- the fold arrow stays put ---------------------- */
+
+#app { position: relative; }
+#toolbar-toggle {
+  position: absolute;
+  /* title bar 40 + progress line 2, then centred in the 34–40px row below */
+  top: 46px;
+  right: 8px;
+  z-index: 4;
+  width: 26px; height: 26px;
+  margin: 0;
+}
+#toolbar { padding-right: 42px; }
+#cell-input { padding-right: 44px; }

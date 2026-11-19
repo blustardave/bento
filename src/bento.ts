@@ -16,6 +16,8 @@ export const BENTO_VERSION = 2;
 /** One sheet's contents, as stored in the file. */
 export interface SheetData {
   name?: string;
+  tabColor?: string;
+  protected?: boolean;
   rows: string[][];
   /** Style table; index 0 is always {} (no formatting). */
   styles: Style[];
@@ -85,6 +87,8 @@ export function sheetToData(doc: Doc): SheetData {
   }
   return {
     name: doc.sheetName,
+    tabColor: doc.tabColor,
+    protected: doc.protected || undefined,
     rows: doc.rows.slice(0, n).map((row) => {
       let end = row.length;
       while (end > 0 && row[end - 1] === "") end--;
@@ -110,6 +114,8 @@ export function sheetToData(doc: Doc): SheetData {
 export function sheetFromData(doc: Doc, file: SheetData) {
   doc.load(file.rows ?? []);
   if (file.name) doc.sheetName = file.name;
+  doc.tabColor = file.tabColor;
+  doc.protected = !!file.protected;
   // Map file style ids → this doc's ids (interning can merge duplicates).
   const map = (file.styles ?? [{}]).map((s) => doc.intern(s));
   for (const [r, st] of file.cellStyles ?? []) doc.setRowStyleArray(r, st.map((id) => map[id] ?? 0));

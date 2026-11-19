@@ -14,7 +14,8 @@ import { ToolButton, divider, grow, toolButton } from "./toolbar";
 import { ZOOMS } from "./grid";
 import { AutoSaver, RecoveredFile, autoSaveEnabled } from "./autosave";
 import { FormatBar } from "./formatbar";
-import { CURRENCIES, Style, detectCurrency } from "./format";
+import { CURRENCIES, HUES, Style, colorLabel, detectCurrency, resolveColor } from "./format";
+import { showPopover } from "./ui";
 import { appVersion, initUpdater } from "./updater";
 import { basename, cellName, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 
@@ -477,6 +478,7 @@ export class App {
 
   private async deleteSheet(doc: Doc) {
     const book = doc.book;
+    if (doc.protected) { toast(`"${doc.sheetName}" is protected — unprotect it first`); return; }
     if (book.sheets.length < 2) { toast("A file needs at least one sheet"); return; }
     if (doc.rows.length) {
       const ok = await modal(`Delete "${doc.sheetName}"?`, "This removes the sheet and everything on it. You can't undo this.", [
@@ -505,6 +507,7 @@ export class App {
 
   /** Rename in place: the tab turns into a little text box. */
   private renameSheet(doc: Doc) {
+    if (doc.protected) { toast(`"${doc.sheetName}" is protected — unprotect it first`); return; }
     const tab = document.querySelector<HTMLElement>(`.sheet-tab[data-sheet="${doc.book.sheets.indexOf(doc)}"]`);
     if (!tab) return;
     const input = el("input", { class: "sheet-rename", value: doc.sheetName, spellcheck: "false" });
@@ -533,17 +536,54 @@ export class App {
     input.addEventListener("blur", () => finish(true));
   }
 
-  private sheetMenu(doc: Doc, x: number, y: number) {
+  private sheetMenu(doc: Doc, x: number, y: number, anchor?: HTMLElement) {
     const book = doc.book;
     const i = book.sheets.indexOf(doc);
+    const locked = doc.protected;
     showMenu([
-      { label: "Rename", action: () => this.renameSheet(doc) },
       { label: "Duplicate", action: () => this.duplicateSheet(doc) },
+      { label: "Rename", disabled: locked, action: () => this.renameSheet(doc) },
+      { label: "Change colour", action: () => this.tabColorPicker(doc, anchor) },
+      { label: locked ? "Unprotect sheet" : "Protect sheet", action: () => {
+        doc.protected = !locked;
+        book.structureDirty = true;
+        this.render();
+        toast(locked ? `"${doc.sheetName}" can be renamed and deleted again` : `"${doc.sheetName}" is protected from renaming and deleting`);
+      } },
+      "sep",
       { label: "Move left", disabled: i === 0, action: () => this.moveSheet(doc, -1) },
       { label: "Move right", disabled: i === book.sheets.length - 1, action: () => this.moveSheet(doc, 1) },
       "sep",
-      { label: "Delete", danger: true, disabled: book.sheets.length < 2, action: () => this.deleteSheet(doc) },
+      { label: "Delete", danger: true, disabled: locked || book.sheets.length < 2, action: () => this.deleteSheet(doc) },
     ], x, y - 4, undefined, "up");
+  }
+
+  /** Pick a tab colour from the same theme-aware palette as cell fills. */
+  private tabColorPicker(doc: Doc, anchor?: HTMLElement) {
+    const tab = anchor ?? document.querySelector<HTMLElement>(`.sheet-tab[data-sheet="${doc.book.sheets.indexOf(doc)}"]`);
+    if (!tab) return;
+    const theme = (document.documentElement.dataset.theme ?? "light") as "light" | "dark" | "dusk";
+    const box = el("div", { class: "palette" });
+    let close = () => {};
+    const pick = (v: string | undefined) => { doc.tabColor = v; doc.book.structureDirty = true; close(); this.render(); };
+    const reset = el("button", { class: "reset", text: "No colour" });
+    reset.addEventListener("click", () => pick(undefined));
+    box.append(reset);
+    for (const tone of ["1", "2"]) {
+      const row = el("div", { class: "swatches" });
+      for (const h of HUES) {
+        const token = `@${h}-${tone}`;
+        const sw = el("button", { class: "swatch" + (doc.tabColor === token ? " on" : ""), title: colorLabel(h) });
+        sw.style.background = resolveColor(token, theme) ?? "transparent";
+        sw.addEventListener("click", () => pick(token));
+        row.append(sw);
+      }
+      box.append(row);
+    }
+    close = showPopover(tab, box);
+    // Open upwards: the tab sits at the bottom of the window.
+    const pop = document.querySelector<HTMLElement>(".popover:last-of-type");
+    if (pop) { const r = tab.getBoundingClientRect(); pop.style.top = `${r.top - pop.getBoundingClientRect().height - 6}px`; }
   }
 
   private renderSheetTabs(box: HTMLElement) {
@@ -559,17 +599,60 @@ export class App {
       showMenu(book.sheets.map((s) => ({ label: s.sheetName, checked: s === d, action: () => this.showSheet(s) })), r.left, r.top - 4, undefined, "up");
     });
     const tabs = el("div", { class: "sheet-tabs" });
+    const theme = (document.documentElement.dataset.theme ?? "light") as "light" | "dark" | "dusk";
+    const els: HTMLElement[] = [];
     book.sheets.forEach((s, i) => {
       const caret = el("span", { class: "caret" });
       caret.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M5.5 6.75 8 9.25l2.5-2.5"/></svg>';
-      const tab = el("button", { class: "sheet-tab" + (s === d ? " active" : ""), "data-sheet": String(i), title: s.sheetName },
-        el("span", { class: "label", text: s.sheetName }), s === d ? caret : null);
-      tab.addEventListener("click", (e) => {
-        if (s !== d) this.showSheet(s);
-        else if (caret.contains(e.target as Node)) { const r = tab.getBoundingClientRect(); this.sheetMenu(s, r.left, r.top); }
+      const lock = s.protected ? el("span", { class: "lock", title: "Protected" }) : null;
+      if (lock) lock.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11"><rect x="4" y="7" width="8" height="6" rx="1.25"/><path d="M5.75 7V5.5a2.25 2.25 0 0 1 4.5 0V7"/></svg>';
+      const tab = el("button", { class: "sheet-tab" + (s === d ? " active" : "") + (s.tabColor ? " coloured" : ""), "data-sheet": String(i), title: s.sheetName },
+        lock, el("span", { class: "label", text: s.sheetName }), s === d ? caret : null);
+      const bg = resolveColor(s.tabColor, theme);
+      if (bg) tab.style.background = bg;
+      // Click to switch, drag to reorder.
+      tab.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || caret.contains(e.target as Node)) return;
+        const startX = e.clientX;
+        let dragging = false;
+        let to = i;
+        const marker = el("div", { class: "sheet-drop" });
+        const move = (ev: PointerEvent) => {
+          if (!dragging && Math.abs(ev.clientX - startX) < 5) return;
+          if (!dragging) { dragging = true; tab.classList.add("dragging"); tabs.append(marker); document.body.classList.add("grabbing"); }
+          // Insertion point = the gap nearest the pointer.
+          to = els.length;
+          for (let k = 0; k < els.length; k++) {
+            const r = els[k].getBoundingClientRect();
+            if (ev.clientX < r.left + r.width / 2) { to = k; break; }
+          }
+          const ref = els[Math.min(to, els.length - 1)].getBoundingClientRect();
+          const host = tabs.getBoundingClientRect();
+          marker.style.left = `${(to < els.length ? ref.left : ref.right) - host.left + tabs.scrollLeft - 1}px`;
+        };
+        const up = () => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+          document.body.classList.remove("grabbing");
+          marker.remove();
+          tab.classList.remove("dragging");
+          if (!dragging) { if (s !== d) this.showSheet(s); return; }
+          const target = to > i ? to - 1 : to;
+          if (target !== i) {
+            book.sheets.splice(i, 1);
+            book.sheets.splice(target, 0, s);
+            book.current = book.sheets.indexOf(this.active!);
+            book.structureDirty = true;
+          }
+          this.render();
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
       });
+      caret.addEventListener("click", (e) => { e.stopPropagation(); const r = tab.getBoundingClientRect(); this.sheetMenu(s, r.left, r.top, tab); });
       tab.addEventListener("dblclick", () => this.renameSheet(s));
-      tab.addEventListener("contextmenu", (e) => { e.preventDefault(); this.sheetMenu(s, e.clientX, e.clientY); });
+      tab.addEventListener("contextmenu", (e) => { e.preventDefault(); this.sheetMenu(s, e.clientX, e.clientY, tab); });
+      els.push(tab);
       tabs.append(tab);
     });
     box.append(add, all, tabs);
@@ -787,6 +870,8 @@ export class App {
     });
     windowControls.setBackground(getComputedStyle(document.documentElement).getPropertyValue("--bg").trim());
     this.grid.readColors();
+    // Tab colours are resolved per theme.
+    if (this.active) this.renderStatus();
   }
 
   /* -------------------------------- zoom -------------------------------- */
