@@ -34,6 +34,12 @@ export interface GridHooks {
   onNotice?(text: string): void;
   /** Ask a yes/no question (e.g. before overwriting cells). */
   onConfirm?(title: string, message: string, yes: string): Promise<boolean>;
+  /** After every repaint (floating objects follow the grid). */
+  onRender?(): void;
+  /** A click on a dropdown cell's chip: show its choices. */
+  onDropdown?(r: number, c: number, x: number, y: number): void;
+  /** An image on the clipboard was pasted. */
+  onPasteImage?(file: File): void;
 }
 
 type Drag =
@@ -655,7 +661,20 @@ export class Grid {
     }
     this.drawSelectionOverlay();
     this.drawFreezePreview();
+    this.hooks.onRender?.();
   }
+
+  /* ------------------------- for floating objects ------------------------- */
+
+  get headerHeight(): number { return this.hh; }
+  colWidth(c: number): number { return this.cw(c); }
+  viewport(): { w: number; h: number } { return { w: this.scroller.clientWidth, h: this.scroller.clientHeight }; }
+  scrollBy(dx: number, dy: number) {
+    const d = this.doc;
+    if (d) this.setScroll(d.scrollX + dx, d.scrollY + dy);
+  }
+  /** Repaint right away (not on the next frame). */
+  paintNow() { cancelAnimationFrame(this.raf); this.raf = 0; this.render(); }
 
   /**
    * Selection borders and the fill handle, drawn after everything else so
@@ -788,6 +807,7 @@ export class Grid {
       if (box.w < 6) return;
       const st = d.rowStyleArray(dr);
       const s = st && st[c] ? d.styles[st[c]] : NO_STYLE;
+      if (s.check || s.list || s.img) return; // drawn as widgets below
       const { text: full, err, numeric } = this.cellText(dr, c, raw, s);
       const header = r === 0 && d.frozenRows > 0;
       const ha = s.ha ?? (numeric && !header ? "r" : "l");
@@ -864,6 +884,23 @@ export class Grid {
     }
     for (const [r, c] of anchors) drawText(r, c);
 
+    // 2b. Checkboxes, dropdown chips and images in cells.
+    for (let r = r0; r <= r1; r++) {
+      const dr = d.dataRow(r);
+      if (dr >= d.rows.length) break;
+      const st = d.rowStyleArray(dr);
+      if (!st) continue;
+      for (let c = c0; c <= Math.min(c1, st.length - 1); c++) {
+        if (!st[c] || covered.has(r * 65536 + c)) continue;
+        const s = d.styles[st[c]];
+        if (s.check || s.list || s.img) this.drawWidget(r, c, s, boxOf(r, c, mergeOf(r, c)));
+      }
+    }
+    for (const [r, c] of anchors) {
+      const s = d.style(d.dataRow(r), c);
+      if (s.check || s.list || s.img) this.drawWidget(r, c, s, boxOf(r, c, mergeOf(r, c)));
+    }
+
     // 3. Grid lines (none inside merged cells).
     const L = this.lw;
     ctx.fillStyle = k.line;
@@ -894,6 +931,180 @@ export class Grid {
     }
 
     void single;
+  }
+
+  /* ------------------------------ cell widgets ------------------------------ */
+
+  private images = new Map<string, HTMLImageElement>();
+
+  private imageFor(id: string): HTMLImageElement | null {
+    const d = this.doc!;
+    const url = d.images.get(id);
+    if (!url) return null;
+    let img = this.images.get(id);
+    if (!img || img.src !== url) {
+      img = new Image();
+      img.onload = () => this.invalidate();
+      img.src = url;
+      this.images.set(id, img);
+    }
+    return img.complete && img.naturalWidth ? img : null;
+  }
+
+  /** Is this cell's checkbox ticked? */
+  isChecked(dr: number, c: number): boolean {
+    const v = this.doc!.engine.value(dr, c);
+    return v === true || (typeof v === "string" && v.trim().toUpperCase() === "TRUE");
+  }
+
+  /** Where a cell's checkbox sits. */
+  private checkBox(box: { x: number; y: number; w: number; h: number }, s: Style) {
+    const z = this.zoom;
+    const size = Math.round(14 * z);
+    const ha = s.ha ?? "c";
+    const x = ha === "l" ? box.x + this.pad : ha === "r" ? box.x + box.w - this.pad - size : box.x + (box.w - size) / 2;
+    const va = s.va ?? "m";
+    const y = va === "t" ? box.y + 5 * z : va === "b" && box.h > this.rh * 1.5 ? box.y + box.h - 5 * z - size : box.y + (box.h - size) / 2;
+    return { x: Math.round(x), y: Math.round(y), w: size, h: size };
+  }
+
+  /** The clickable chip (or bare chevron) of a dropdown cell. */
+  private chipBox(r: number, c: number, s: Style, box: { x: number; y: number; w: number; h: number }) {
+    const d = this.doc!;
+    const z = this.zoom;
+    const text = d.display(d.dataRow(r), c);
+    const h = Math.min(box.h - 6 * z, Math.round(20 * z));
+    const y = box.y + (box.h - h) / 2;
+    const chev = 16 * z;
+    if (!text) return { x: box.x + box.w - chev - 4 * z, y, w: chev, h, text, valid: true };
+    this.ctx.font = this.cellFont(s, false);
+    const w = Math.min(box.w - 8 * z, this.ctx.measureText(text).width + 10 * z + chev);
+    const valid = !!s.list?.includes(text);
+    return { x: box.x + 4 * z, y, w, h, text, valid };
+  }
+
+  private drawWidget(r: number, c: number, s: Style, box: { x: number; y: number; w: number; h: number }) {
+    const { ctx, colors: k } = this;
+    const d = this.doc!;
+    const dr = d.dataRow(r);
+    const z = this.zoom;
+    if (box.w < 8) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(box.x, box.y, box.w - 1, box.h - 1);
+    ctx.clip();
+    if (s.img) {
+      const img = this.imageFor(s.img);
+      if (img) {
+        const inset = 2 * z;
+        const bw = box.w - inset * 2 - 1, bh = box.h - inset * 2 - 1;
+        const scale = Math.min(bw / img.naturalWidth, bh / img.naturalHeight);
+        const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+        const ha = s.ha ?? "c";
+        const x = ha === "l" ? box.x + inset : ha === "r" ? box.x + box.w - inset - w - 1 : box.x + (box.w - w) / 2;
+        const va = s.va ?? "m";
+        const y = va === "t" ? box.y + inset : va === "b" ? box.y + box.h - inset - h - 1 : box.y + (box.h - h) / 2;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, x, y, w, h);
+      }
+    } else if (s.check) {
+      const b = this.checkBox(box, s);
+      const on = this.isChecked(dr, c);
+      const rad = 3 * z;
+      ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, rad);
+      if (on) {
+        ctx.fillStyle = k.accent;
+        ctx.fill();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1.7 * z;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        ctx.moveTo(b.x + b.w * 0.26, b.y + b.h * 0.53);
+        ctx.lineTo(b.x + b.w * 0.43, b.y + b.h * 0.7);
+        ctx.lineTo(b.x + b.w * 0.75, b.y + b.h * 0.33);
+        ctx.stroke();
+      } else {
+        ctx.beginPath(); ctx.roundRect(b.x + 0.75, b.y + 0.75, b.w - 1.5, b.h - 1.5, rad);
+        ctx.strokeStyle = k.muted;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    } else if (s.list) {
+      const chip = this.chipBox(r, c, s, box);
+      const chevX = chip.x + chip.w - 11 * z;
+      const chevY = chip.y + chip.h / 2;
+      if (chip.text) {
+        ctx.beginPath(); ctx.roundRect(chip.x, chip.y, chip.w, chip.h, chip.h / 2);
+        if (chip.valid) { ctx.fillStyle = k.surface2; ctx.fill(); }
+        else { ctx.strokeStyle = k.error; ctx.lineWidth = 1; ctx.setLineDash([3, 2]); ctx.stroke(); ctx.setLineDash([]); }
+        ctx.font = this.cellFont(s, false);
+        ctx.textBaseline = "middle";
+        ctx.textAlign = "left";
+        ctx.fillStyle = chip.valid ? resolveColor(s.color, this.theme) ?? k.text : k.error;
+        ctx.save();
+        ctx.beginPath(); ctx.rect(chip.x, chip.y, chip.w - 16 * z, chip.h); ctx.clip();
+        ctx.fillText(chip.text, chip.x + 8 * z, chevY + 0.5);
+        ctx.restore();
+      }
+      ctx.strokeStyle = k.muted;
+      ctx.lineWidth = 1.3 * z;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(chevX - 3 * z, chevY - 1.5 * z);
+      ctx.lineTo(chevX, chevY + 1.5 * z);
+      ctx.lineTo(chevX + 3 * z, chevY - 1.5 * z);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /** Did a click at (x, y) land on a cell's checkbox or dropdown chip? */
+  private widgetHit(x: number, y: number): { kind: "check" | "list"; r: number; c: number } | null {
+    const d = this.doc!;
+    if (this.zoneAt(x, y) !== "cell") return null;
+    let r = this.rowAt(y), c = this.colAt(x);
+    const m = this.mergeAt(r, c);
+    if (m) { r = m.r0; c = m.c0; }
+    const dr = d.dataRow(r);
+    if (dr >= d.rows.length && !d.rowStyleArray(dr)) return null;
+    const s = d.style(dr, c);
+    if (!s.check && !s.list) return null;
+    const box = this.cellBox(r, c);
+    const slop = 3 * this.zoom;
+    const inside = (b: { x: number; y: number; w: number; h: number }) => x >= b.x - slop && x <= b.x + b.w + slop && y >= b.y - slop && y <= b.y + b.h + slop;
+    if (s.check) return inside(this.checkBox(box, s)) ? { kind: "check", r, c } : null;
+    return inside(this.chipBox(r, c, s, box)) ? { kind: "list", r, c } : null;
+  }
+
+  /** Tick or untick checkboxes: the clicked one, or every one in the selection. */
+  toggleChecks(cells?: { r: number; c: number }[]) {
+    const d = this.doc!;
+    const list: { r: number; c: number }[] = [];
+    if (cells) list.push(...cells.map(({ r, c }) => ({ r: d.dataRow(r), c })));
+    else for (const rect of allRects(d.sel)) for (let r = rect.r0; r <= Math.min(rect.r1, this.lastRow() + 1000); r++) {
+      const dr = d.dataRow(r);
+      if (dr >= d.rows.length) break;
+      for (let c = rect.c0; c <= rect.c1; c++) if (d.style(dr, c).check) list.push({ r: dr, c });
+    }
+    if (!list.length) return false;
+    const allOn = list.every(({ r, c }) => this.isChecked(r, c));
+    d.setCells(list.map(({ r, c }) => ({ r, c, v: allOn ? "FALSE" : "TRUE" })), allOn ? "Untick" : "Tick");
+    this.hooks.onChange();
+    return true;
+  }
+
+  /** Open the active cell's dropdown, if it has one. */
+  openDropdown(): boolean {
+    const d = this.doc!;
+    const { ar, ac } = d.sel;
+    const s = d.style(d.dataRow(ar), ac);
+    if (!s.list) return false;
+    const box = this.cellBox(ar, ac);
+    const rect = this.wrap.getBoundingClientRect();
+    this.hooks.onDropdown?.(ar, ac, rect.left + box.x, rect.top + box.y + box.h + 2);
+    return true;
   }
 
   /** Underline / strikethrough for one line of text. */
@@ -1624,7 +1835,21 @@ export class Grid {
       if (!row) continue;
       for (let c = s.c0; c <= Math.min(s.c1, row.length - 1); c++) if (row[c] !== "") cells.push({ r: dr, c, v: "" });
     }
-    d.setCells(cells, label);
+    // Images in cells count as content.
+    const sets: { r: number; c: number; v?: string; style?: number }[] = cells;
+    for (const s of allRects(d.sel)) for (let r = s.r0; r <= Math.min(s.r1, lastData); r++) {
+      const dr = d.dataRow(r);
+      const st = d.rowStyleArray(dr);
+      if (!st) continue;
+      for (let c = s.c0; c <= Math.min(s.c1, st.length - 1); c++) {
+        const style = d.styles[st[c]];
+        if (!style?.img) continue;
+        const { img: _, ...rest } = style;
+        const ex = sets.find((x) => x.r === dr && x.c === c);
+        if (ex) ex.style = d.intern(rest); else sets.push({ r: dr, c, style: d.intern(rest) });
+      }
+    }
+    d.setCells(sets, label);
     this.hooks.onChange();
   }
 
@@ -1707,11 +1932,11 @@ export class Grid {
     let handled = true;
     switch (e.key) {
       case "ArrowUp": ctrl ? this.jump(-1, 0, sh) : this.move(-1, 0, sh); break;
-      case "ArrowDown": ctrl ? this.jump(1, 0, sh) : this.move(1, 0, sh); break;
+      case "ArrowDown": if (e.altKey && this.openDropdown()) break; ctrl ? this.jump(1, 0, sh) : this.move(1, 0, sh); break;
       case "ArrowLeft": ctrl ? this.jump(0, -1, sh) : this.move(0, -1, sh); break;
       case "ArrowRight": ctrl ? this.jump(0, 1, sh) : this.move(0, 1, sh); break;
       case "Tab": this.move(0, sh ? -1 : 1, false); break;
-      case "Enter": if (sh) this.move(-1, 0, false); else this.startEdit("edit"); break;
+      case "Enter": if (sh) this.move(-1, 0, false); else if (!ctrl && !e.altKey && this.openDropdown()) break; else this.startEdit("edit"); break;
       case "F2": this.startEdit("edit"); break;
       case "PageDown": this.move(this.pageRows(), 0, sh); break;
       case "PageUp": this.move(-this.pageRows(), 0, sh); break;
@@ -1728,6 +1953,10 @@ export class Grid {
       case "Delete":
       case "Backspace": this.clear(); break;
       case "Escape": this.matcher = null; this.invalidate(); handled = false; break;
+      case " ":
+        // Space ticks the selection's checkboxes.
+        handled = !ctrl && !sh && !e.altKey && d.style(d.dataRow(s.ar), s.ac).check === true && this.toggleChecks();
+        break;
       default: handled = false;
     }
     if (!handled && ctrl) {
@@ -1749,7 +1978,9 @@ export class Grid {
 
   applyUndo(sel: Sel | null) {
     if (!sel) return;
-    this.select(sel);
+    // Bring the active cell into view (not the far corner of, say, a whole row).
+    this.select(sel, false);
+    this.scrollIntoView(this.doc!.sel.ar, this.doc!.sel.ac);
     this.hooks.onChange();
   }
 
@@ -1858,7 +2089,10 @@ export class Grid {
         this.onColumnHeaderMenu(c, rect.left + this.colLeft(c) + this.cw(c) - 24, rect.top + this.hh);
         return;
       }
+      const hit = !e.shiftKey && !e.ctrlKey && !e.metaKey ? this.widgetHit(x, y) : null;
       this.pointSelect(zone, x, y, e.shiftKey, (e.ctrlKey || e.metaKey) && !e.shiftKey);
+      if (hit?.kind === "check") { this.toggleChecks([{ r: hit.r, c: hit.c }]); return; }
+      if (hit?.kind === "list") { this.openDropdown(); return; }
       this.drag = zone === "col" ? { kind: "cols" } : zone === "row" ? { kind: "rows" } : zone === "cell" ? { kind: "cells" } : null;
       if (this.drag) { sc.setPointerCapture(e.pointerId); this.pointer = { x, y }; this.startAutoScroll(); }
     });
@@ -1979,6 +2213,8 @@ export class Grid {
     });
     this.sink.addEventListener("paste", (e) => {
       e.preventDefault();
+      const pic = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
+      if (pic && this.hooks.onPasteImage) { this.hooks.onPasteImage(pic); return; }
       const t = e.clipboardData?.getData("text/plain");
       if (t) this.paste(t);
     });

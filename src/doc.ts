@@ -49,6 +49,31 @@ let nextId = 1;
 
 export const DEFAULT_WIDTH = 100;
 
+/* ------------------------------ floating objects ------------------------------ */
+
+export type ChartType = "column" | "bar" | "line" | "pie";
+export type ShapeType = "rect" | "round" | "ellipse" | "triangle" | "diamond" | "arrow" | "text";
+
+interface ObjectBase {
+  id: string;
+  /** Top-left corner: a display cell plus an offset into it (unzoomed px). */
+  r: number; c: number; dx: number; dy: number;
+  /** Size in unzoomed px. */
+  w: number; h: number;
+}
+export interface ChartObject extends ObjectBase { kind: "chart"; chart: ChartType; range: string; title?: string }
+export interface ImageObject extends ObjectBase { kind: "image"; img: string }
+export interface ShapeObject extends ObjectBase {
+  kind: "shape"; shape: ShapeType;
+  fill?: string; stroke?: string; text?: string;
+  /** Text colour (palette token or hex). */
+  color?: string;
+}
+export type SheetObject = ChartObject | ImageObject | ShapeObject;
+
+export const newId = () => Math.random().toString(36).slice(2, 9);
+const cloneObjects = (list: SheetObject[]) => list.map((o) => ({ ...o }));
+
 export class Doc {
   readonly id = nextId++;
   /** The file this sheet belongs to. Name, path and source are the file's. */
@@ -59,6 +84,10 @@ export class Doc {
   tabColor: string | undefined;
   /** Protected sheets can't be renamed or deleted. */
   protected = false;
+  /** Charts, images, shapes and text boxes floating over the grid (bottom first). */
+  objects: SheetObject[] = [];
+  /** Image data (data: URLs) by id, used by image objects and images in cells. */
+  images = new Map<string, string>();
   get name(): string { return this.book.name; }
   set name(v: string) { this.book.name = v; }
   get path(): string | null { return this.book.path; }
@@ -229,17 +258,21 @@ export class Doc {
   private push(op: Op) {
     // Every step remembers the merges before and after, so undo/redo of
     // structural changes puts merged cells back exactly.
+    // Floating objects too, since inserting/deleting rows moves them.
     const mBefore = this.merges.map((m) => ({ ...m }));
     const gBefore = [this.gridRows, this.gridCols];
+    const oBefore = cloneObjects(this.objects);
     let mAfter: Rect[] = [];
     let gAfter = gBefore;
+    let oAfter: SheetObject[] = [];
     const run = op.run, undo = op.undo;
     op.run = () => { run(); };
-    op.undo = () => { undo(); this.merges = mBefore.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gBefore; };
+    op.undo = () => { undo(); this.merges = mBefore.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gBefore; this.objects = cloneObjects(oBefore); };
     op.run();
     mAfter = this.merges.map((m) => ({ ...m }));
     gAfter = [this.gridRows, this.gridCols];
-    op.run = () => { run(); this.merges = mAfter.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gAfter; };
+    oAfter = cloneObjects(this.objects);
+    op.run = () => { run(); this.merges = mAfter.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gAfter; this.objects = cloneObjects(oAfter); };
     this.undoStack.push(op);
     if (this.undoStack.length > MAX_UNDO) {
       const dropped = this.undoStack.shift();
@@ -309,6 +342,32 @@ export class Doc {
     });
   }
 
+  /**
+   * Record a change to the floating objects as one undo step. `before` is a
+   * snapshot taken before the change; the current list is the "after".
+   */
+  commitObjects(before: SheetObject[], label = "Edit object") {
+    const after = cloneObjects(this.objects);
+    if (JSON.stringify(after) === JSON.stringify(before)) return;
+    const b = cloneObjects(before);
+    this.push({
+      label,
+      selBefore: { ...this.sel },
+      run: () => { this.objects = cloneObjects(after); },
+      undo: () => { this.objects = cloneObjects(b); },
+    });
+  }
+
+  snapshotObjects(): SheetObject[] { return cloneObjects(this.objects); }
+
+  /** Store image data, returning its id (the same data gets the same id). */
+  addImage(url: string): string {
+    for (const [id, u] of this.images) if (u === url) return id;
+    const id = newId();
+    this.images.set(id, url);
+    return id;
+  }
+
   /* ----------------------------- formatting ----------------------------- */
 
   styleId(r: number, c: number): number {
@@ -354,6 +413,7 @@ export class Doc {
   }
 
   hasFormatting(): boolean {
+    if (this.objects.length) return true;
     for (const row of this.rows) { const st = this.rowStyles.get(row); if (st && st.some((x) => x)) return true; }
     return false;
   }
@@ -465,6 +525,7 @@ export class Doc {
 
   /** Rewrite formulas after a structural change; returns what changed. */
   private shiftFormulas(axis: "row" | "col", at: number, delta: number): CellChange[] {
+    this.shiftObjects(axis, at, delta);
     const out: CellChange[] = [];
     const rows = this.rows;
     for (let r = 0; r < rows.length; r++) {
@@ -477,6 +538,22 @@ export class Doc {
       }
     }
     return out;
+  }
+
+  /** Objects below/right of inserted or deleted rows/columns move with the cells; chart ranges follow. */
+  private shiftObjects(axis: "row" | "col", at: number, delta: number) {
+    for (const o of this.objects) {
+      const k = axis === "row" ? "r" : "c";
+      if (delta > 0 && o[k] >= at) o[k] += delta;
+      else if (delta < 0 && o[k] >= at) {
+        if (o[k] < at - delta) { o[k] = at; if (axis === "row") o.dy = 0; else o.dx = 0; }
+        else o[k] += delta;
+      }
+      if (o.kind === "chart") {
+        const next = shiftFormula("=" + o.range, axis, at, delta).slice(1);
+        if (!next.includes("#")) o.range = next;
+      }
+    }
   }
 
   private restore(changes: CellChange[]) {

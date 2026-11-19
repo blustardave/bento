@@ -32,6 +32,12 @@ export interface Style {
   font?: string;   // family name (default: the UI font)
   rot?: Rotation;
   nf?: NumFmt;
+  /** Shows a tickbox; the cell holds TRUE / FALSE. */
+  check?: boolean;
+  /** A dropdown: the choices offered. */
+  list?: string[];
+  /** An image shown in the cell (an id in the sheet's image table). */
+  img?: string;
 }
 
 /** Fonts offered in the toolbar; all ship with Windows (Source Serif is bundled). */

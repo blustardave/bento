@@ -1,7 +1,7 @@
 import { el } from "./util";
 
 export type MenuItem =
-  | { label: string; key?: string; action?: () => void; disabled?: boolean; checked?: boolean; danger?: boolean; font?: string }
+  | { label: string; key?: string; action?: () => void; disabled?: boolean; checked?: boolean; danger?: boolean; font?: string; icon?: string; children?: MenuItem[] }
   | { heading: string }
   | "sep";
 
@@ -11,29 +11,123 @@ export function closeMenus() {
   openMenu?.close();
 }
 
-/** Show a popup menu at (x, y). Closes on pick, Escape, or click outside. */
+const CHEVRON = '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M6.25 4.5 9.75 8l-3.5 3.5"/></svg>';
+
+interface Level {
+  el: HTMLElement;
+  buttons: HTMLButtonElement[];
+  hot: number;
+  setHot(i: number): void;
+  child: Level | null;
+  parent: Level | null;
+  /** Which button opened the child. */
+  childOf: number;
+  items: MenuItem[];
+}
+
+/**
+ * Show a popup menu at (x, y). Closes on pick, Escape, or click outside.
+ * Items with `children` open a submenu to the right (or the left, when
+ * there isn't room).
+ */
 export function showMenu(items: MenuItem[], x: number, y: number, onClose?: () => void, dir: "down" | "up" = "down") {
   closeMenus();
-  const menu = el("div", { class: "menu", role: "menu" });
-  const buttons: HTMLButtonElement[] = [];
-  const hasChecks = items.some((i) => typeof i === "object" && "label" in i && i.checked !== undefined);
-  for (const it of items) {
-    if (it === "sep") { menu.append(el("div", { class: "sep" })); continue; }
-    if ("heading" in it) { menu.append(el("div", { class: "heading", text: it.heading })); continue; }
-    const b = el("button", { class: "item" + (it.danger ? " danger" : ""), role: "menuitem" },
-      hasChecks ? el("span", { class: "check", text: it.checked ? "✓" : "" }) : null,
-      el("span", { class: "label", text: it.label, ...(it.font ? { style: `font-family: "${it.font}", var(--font-ui)` } : {}) }),
-      it.key ? el("span", { class: "key", text: it.key }) : null,
-    );
-    if (it.disabled) b.disabled = true;
-    b.addEventListener("click", () => { close(); it.action?.(); });
-    b.addEventListener("mouseenter", () => setHot(buttons.indexOf(b)));
-    buttons.push(b);
-    menu.append(b);
+  let switchTimer = 0;
+  const levels: Level[] = [];
+
+  function build(list: MenuItem[], parent: Level | null): Level {
+    const menu = el("div", { class: "menu" + (parent ? " sub" : ""), role: "menu" });
+    const lvl: Level = { el: menu, buttons: [], hot: -1, setHot: () => {}, child: null, parent, childOf: -1, items: list };
+    const hasChecks = list.some((i) => typeof i === "object" && "label" in i && i.checked !== undefined);
+    const hasIcons = list.some((i) => typeof i === "object" && "label" in i && i.icon);
+    for (const it of list) {
+      if (it === "sep") { menu.append(el("div", { class: "sep" })); continue; }
+      if ("heading" in it) { menu.append(el("div", { class: "heading", text: it.heading })); continue; }
+      const icon = hasIcons ? el("span", { class: "icon" }) : null;
+      if (icon && it.icon) icon.innerHTML = it.icon;
+      const more = it.children ? el("span", { class: "more" }) : null;
+      if (more) more.innerHTML = CHEVRON;
+      const b = el("button", { class: "item" + (it.danger ? " danger" : "") + (it.children ? " parent" : ""), role: "menuitem" },
+        hasChecks ? el("span", { class: "check", text: it.checked ? "✓" : "" }) : null,
+        icon,
+        el("span", { class: "label", text: it.label, ...(it.font ? { style: `font-family: "${it.font}", var(--font-ui)` } : {}) }),
+        it.key ? el("span", { class: "key", text: it.key }) : null,
+        more,
+      );
+      if (it.disabled) b.disabled = true;
+      const idx = lvl.buttons.length;
+      b.addEventListener("click", () => {
+        if (it.children) { openChild(lvl, idx, true); return; }
+        close(); it.action?.();
+      });
+      b.addEventListener("mouseenter", () => {
+        lvl.setHot(idx);
+        clearTimeout(switchTimer);
+        // A short pause, so moving diagonally into an open submenu doesn't
+        // close it on the way past other items.
+        switchTimer = window.setTimeout(() => {
+          if (it.children && !it.disabled) openChild(lvl, idx, false);
+          else closeChild(lvl);
+        }, lvl.child ? 160 : it.children ? 60 : 0);
+      });
+      lvl.buttons.push(b);
+      menu.append(b);
+    }
+    lvl.setHot = (i: number) => {
+      lvl.buttons.forEach((b, j) => b.classList.toggle("hot", j === i));
+      lvl.hot = i;
+    };
+    // Leaving the menu clears the highlight (keyboard navigation sets it again),
+    // except on the item whose submenu is open.
+    menu.addEventListener("mouseleave", () => { if (!lvl.child) lvl.setHot(-1); });
+    menu.addEventListener("mouseenter", () => {
+      clearTimeout(switchTimer);
+      if (lvl.parent) lvl.parent.setHot(lvl.parent.childOf);
+    });
+    document.body.append(menu);
+    levels.push(lvl);
+    return lvl;
   }
-  // Leaving the menu clears the highlight (keyboard navigation sets it again).
-  menu.addEventListener("mouseleave", () => setHot(-1));
-  document.body.append(menu);
+
+  function closeChild(lvl: Level) {
+    if (!lvl.child) return;
+    closeChild(lvl.child);
+    lvl.child.el.remove();
+    levels.splice(levels.indexOf(lvl.child), 1);
+    lvl.buttons[lvl.childOf]?.classList.remove("open");
+    lvl.child = null;
+    lvl.childOf = -1;
+  }
+
+  function openChild(lvl: Level, idx: number, focusFirst: boolean) {
+    if (lvl.childOf === idx && lvl.child) { if (focusFirst) firstHot(lvl.child); return; }
+    closeChild(lvl);
+    const it = lvl.items.filter((i) => i !== "sep" && !("heading" in (i as object)))[idx] as Extract<MenuItem, { label: string }>;
+    if (!it?.children) return;
+    const child = build(it.children, lvl);
+    lvl.child = child;
+    lvl.childOf = idx;
+    const btn = lvl.buttons[idx];
+    btn.classList.add("open");
+    const br = btn.getBoundingClientRect();
+    const pr = lvl.el.getBoundingClientRect();
+    const r = child.el.getBoundingClientRect();
+    // Right of the parent if it fits, else to its left.
+    let left = pr.right + 4;
+    if (left + r.width > window.innerWidth - 6) left = Math.max(6, pr.left - r.width - 4);
+    const top = Math.max(6, Math.min(br.top - 5, window.innerHeight - r.height - 6));
+    child.el.style.left = left + "px";
+    child.el.style.top = top + "px";
+    if (focusFirst) firstHot(child);
+  }
+
+  function firstHot(lvl: Level) {
+    const i = lvl.buttons.findIndex((b) => !b.disabled);
+    if (i >= 0) lvl.setHot(i);
+  }
+
+  const root = build(items, null);
+  const menu = root.el;
 
   // Keep it on screen.
   const r = menu.getBoundingClientRect();
@@ -42,25 +136,38 @@ export function showMenu(items: MenuItem[], x: number, y: number, onClose?: () =
   menu.style.left = Math.max(6, vx) + "px";
   menu.style.top = vy + "px";
 
-  let hot = -1;
-  function setHot(i: number) {
-    buttons.forEach((b, j) => b.classList.toggle("hot", j === i));
-    hot = i;
+  /** The deepest level with a highlighted item (keyboard focus). */
+  function focused(): Level {
+    let l = root;
+    while (l.child && l.child.hot >= 0) l = l.child;
+    return l;
   }
+
   function onKey(e: KeyboardEvent) {
-    const enabled = buttons.filter((b) => !b.disabled);
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    const lvl = focused();
+    const enabled = lvl.buttons.filter((b) => !b.disabled);
+    const it = lvl.hot >= 0 ? (lvl.items.filter((i) => i !== "sep" && !("heading" in (i as object)))[lvl.hot] as Extract<MenuItem, { label: string }>) : null;
+    if (e.key === "Escape") {
+      e.preventDefault(); e.stopPropagation();
+      if (lvl.parent) { const p = lvl.parent; closeChild(p); p.setHot(p.hot); } else close();
+    }
     else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault(); e.stopPropagation();
-      const cur = enabled.indexOf(buttons[hot]);
+      if (!enabled.length) return;
+      const cur = enabled.indexOf(lvl.buttons[lvl.hot]);
       const next = e.key === "ArrowDown" ? (cur + 1) % enabled.length : (cur - 1 + enabled.length) % enabled.length;
-      setHot(buttons.indexOf(enabled[next]));
-    } else if (e.key === "Enter" && hot >= 0) { e.preventDefault(); e.stopPropagation(); buttons[hot].click(); }
+      lvl.setHot(lvl.buttons.indexOf(enabled[next]));
+      if (lvl.child) closeChild(lvl);
+    }
+    else if (e.key === "ArrowRight" && it?.children && !it.disabled) { e.preventDefault(); e.stopPropagation(); openChild(lvl, lvl.hot, true); }
+    else if (e.key === "ArrowLeft" && lvl.parent) { e.preventDefault(); e.stopPropagation(); const p = lvl.parent; closeChild(p); }
+    else if (e.key === "Enter" && lvl.hot >= 0) { e.preventDefault(); e.stopPropagation(); lvl.buttons[lvl.hot].click(); }
   }
-  function onDown(e: PointerEvent) { if (!menu.contains(e.target as Node)) close(); }
+  function onDown(e: PointerEvent) { if (!levels.some((l) => l.el.contains(e.target as Node))) close(); }
   function close() {
     if (!menu.isConnected) return;
-    menu.remove();
+    clearTimeout(switchTimer);
+    for (const l of levels) l.el.remove();
     window.removeEventListener("keydown", onKey, true);
     window.removeEventListener("pointerdown", onDown, true);
     window.removeEventListener("blur", close);

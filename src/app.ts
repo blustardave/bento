@@ -16,6 +16,9 @@ import { AutoSaver, RecoveredFile, autoSaveEnabled } from "./autosave";
 import { FormatBar } from "./formatbar";
 import { CURRENCIES, HUES, Style, colorLabel, detectCurrency, resolveColor } from "./format";
 import { showPopover } from "./ui";
+import { ObjectLayer, SHAPES } from "./objects";
+import { CHART_TYPES, chartData, dataRegion, parseRange, rangeText } from "./chart";
+import type { ChartObject, ChartType, ShapeObject, ShapeType, SheetObject } from "./doc";
 import { appVersion, initUpdater } from "./updater";
 import { basename, cellName, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 
@@ -27,6 +30,7 @@ export class App {
   active: Doc | null = null;
   grid: Grid;
   find: FindPanel;
+  objects!: ObjectLayer;
   private untitled = 0;
   private statsTimer = 0;
   private cellInput = $("cell-input") as HTMLInputElement;
@@ -64,6 +68,15 @@ export class App {
       onNotice: (t) => toast(t),
       onConfirm: async (title, message, yes) => !!(await modal(title, message, [{ label: "Cancel", value: false }, { label: yes, value: true, primary: true }])),
       onEditText: (t) => { if (document.activeElement !== this.cellInput) this.cellInput.value = t ?? this.activeRaw(); },
+      onRender: () => this.objects?.render(),
+      onDropdown: (r, c, x, y) => this.dropdownMenu(r, c, x, y),
+      onPasteImage: (f) => this.insertImageFile(f, "over"),
+    });
+    this.objects = new ObjectLayer(this.grid, {
+      doc: () => this.active,
+      onChange: () => this.onChange(),
+      menu: (o, x, y) => this.objectMenu(o, x, y),
+      editChart: (o) => { if (o.kind === "chart") this.chartEditor(o); },
     });
     this.find = new FindPanel(this.grid, () => this.active, () => this.onChange());
     this.buildToolbar();
@@ -80,7 +93,12 @@ export class App {
     this.offerRecovery();
     onFileDrop(
       (s) => ($("drop-hint").hidden = s !== "over"),
-      (files) => this.open(files),
+      (files) => {
+        // Dropping pictures onto a sheet places them on it.
+        const pics = files.filter((f) => IMAGE_EXT.test(f.name));
+        if (pics.length && this.active && pics.length === files.length) { for (const f of pics) this.insertImageRef(f); return; }
+        this.open(files.filter((f) => !IMAGE_EXT.test(f.name)));
+      },
     );
     onOpenFiles((paths) => this.open(paths.map((p) => ({ name: basename(p), path: p }))));
     windowControls.onCloseRequested(() => this.confirmQuit());
@@ -1235,8 +1253,329 @@ export class App {
       { label: "Clear cells", key: "Delete", action: () => this.grid.clear() },
       { label: "Clear formatting", key: "Ctrl+\\", action: () => this.applyFormat(() => ({}), "Clear formatting") },
       "sep",
+      ...this.insertItems(),
+      "sep",
       { label: "Fill down", key: "Ctrl+D", action: () => this.grid.fillDown() },
     ], x, y);
+  }
+
+  /* ------------------------------- inserting ------------------------------- */
+
+  /** Chart / image / shape / dropdown / checkbox items for the cell menu. */
+  private insertItems(): MenuItem[] {
+    const d = this.active!;
+    const st = d.style(d.dataRow(d.sel.ar), d.sel.ac);
+    let anyCheck = false;
+    for (const rect of allRects(d.sel)) {
+      for (let r = rect.r0; r <= Math.min(rect.r1, rect.r0 + 2000) && !anyCheck; r++)
+        for (let c = rect.c0; c <= Math.min(rect.c1, rect.c0 + 200) && !anyCheck; c++) if (d.style(d.dataRow(r), c).check) anyCheck = true;
+    }
+    return [
+      { label: "Chart", children: CHART_TYPES.map(({ type, label }) => ({ label, icon: CHART_ICONS[type], action: () => this.insertChart(type) })) },
+      { label: "Image", children: [
+        { label: "Image in cell", icon: IMG_ICONS.cell, action: () => this.pickImage("cell") },
+        { label: "Image over cells", icon: IMG_ICONS.over, action: () => this.pickImage("over") },
+      ] },
+      { label: "Shape", children: [
+        ...SHAPES.map(({ shape, label, icon }) => ({ label, icon, action: () => this.insertShape(shape) }) as MenuItem),
+        "sep",
+        { label: "Text box", icon: IMG_ICONS.text, action: () => this.insertShape("text") },
+      ] },
+      { label: st.list ? "Edit dropdown…" : "Dropdown…", action: () => this.dropdownDialog() },
+      anyCheck
+        ? { label: "Remove checkboxes", action: () => this.applyFormat((s) => ({ ...s, check: undefined }), "Remove checkboxes") }
+        : { label: "Checkbox", action: () => this.insertCheckboxes() },
+    ];
+  }
+
+  /** A good spot for something new: right of the selection if that's in view, else mid-screen. */
+  private placement(w: number, h: number, beside: boolean, around?: { r0: number; c0: number; r1: number; c1: number }) {
+    const at = this.placementRaw(w, h, beside, around);
+    // Don't stack exactly on top of something already there.
+    const d = this.active!;
+    for (let k = 0; k < 20 && d.objects.some((o) => o.r === at.r && o.c === at.c && Math.abs(o.dx - at.dx) < 4 && Math.abs(o.dy - at.dy) < 4); k++) { at.dx += 24; at.dy += 24; }
+    return at;
+  }
+
+  private placementRaw(w: number, h: number, beside: boolean, around?: { r0: number; c0: number; r1: number; c1: number }) {
+    const g = this.grid, d = this.active!;
+    const s = around ?? selRect(d.sel);
+    const vp = g.viewport();
+    const z = g.zoom;
+    if (beside) {
+      const x = g.colLeft(s.c1) + g.colWidth(s.c1) + 16 * z;
+      const y = Math.max(g.headerHeight + 8, g.rowTop(s.r0));
+      if (x + w * z < vp.w - 8 && y + 40 < vp.h) return this.objects.anchorAt(x, y);
+    } else {
+      const x = g.colLeft(s.c0), y = g.rowTop(s.r0);
+      if (x >= g.rowHeaderWidth() && x + 40 < vp.w && y >= g.headerHeight && y + 40 < vp.h) {
+        // Nudge it back so it's fully on screen.
+        const fx = Math.max(g.rowHeaderWidth() + 8, Math.min(x + 4 * z, vp.w - w * z - 16));
+        const fy = Math.max(g.headerHeight + 8, Math.min(y + 4 * z, vp.h - h * z - 16));
+        return this.objects.anchorAt(fx, fy);
+      }
+    }
+    const cx = Math.max(g.rowHeaderWidth() + 8, (g.rowHeaderWidth() + vp.w - w * z) / 2);
+    const cy = Math.max(g.headerHeight + 8, (g.headerHeight + vp.h - h * z) / 2);
+    return this.objects.anchorAt(cx, cy);
+  }
+
+  private insertChart(chart: ChartType) {
+    const d = this.active;
+    if (!d) return;
+    if (this.grid.editing) this.grid.commitEdit();
+    let s = selRect(d.sel);
+    let rect = { r0: d.dataRow(s.r0), c0: s.c0, r1: d.dataRow(Math.min(s.r1, this.grid.lastRow())), c1: s.c1 };
+    // One cell selected: chart the block of data around it.
+    if (s.r0 === s.r1 && s.c0 === s.c1) rect = dataRegion(d, d.dataRow(s.r0), s.c0);
+    if (this.grid.isWholeCols(s)) rect.r1 = Math.max(0, d.rows.length - 1);
+    if (this.grid.isWholeRows(s)) rect.c1 = Math.max(0, d.cols - 1);
+    s = rect;
+    const w = 440, h = 280;
+    // Beside the data (in display rows; the range is in data rows).
+    const shown = d.displayRow(s.r0);
+    const at = this.placement(w, h, true, { r0: shown >= 0 ? shown : selRect(d.sel).r0, c0: s.c0, r1: s.r1, c1: s.c1 });
+    const range = rangeText(s);
+    const data = chartData(d, range);
+    // One series: name the chart after it, like Sheets.
+    const title = data && (data.series.length === 1 || chart === "pie") && !/^Series \d+$/.test(data.series[0].name) ? data.series[0].name : undefined;
+    this.objects.add({ kind: "chart", chart, range, title, ...at, w, h } as Omit<ChartObject, "id">, "Insert chart");
+  }
+
+  private insertShape(shape: ShapeType) {
+    const d = this.active;
+    if (!d) return;
+    if (this.grid.editing) this.grid.commitEdit();
+    const text = shape === "text";
+    const w = text ? 180 : 150, h = text ? 44 : 96;
+    const at = this.placement(w, h, false);
+    const o = this.objects.add({
+      kind: "shape", shape, ...at, w, h,
+      fill: text ? undefined : "@orange-1", stroke: text ? undefined : "@orange", text: text ? "Text" : "",
+    } as Omit<ShapeObject, "id">, text ? "Insert text box" : "Insert shape");
+    if (text) requestAnimationFrame(() => this.objects.editText(o.id));
+  }
+
+  /** Ask for a picture file. */
+  private pickImage(mode: "cell" | "over") {
+    const input = el("input", { type: "file", accept: "image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml" }) as HTMLInputElement;
+    input.addEventListener("change", () => { const f = input.files?.[0]; if (f) this.insertImageFile(f, mode); });
+    input.click();
+  }
+
+  private async insertImageRef(ref: import("./native").FileRef) {
+    try {
+      const bytes = await readFile(ref);
+      const ext = ref.name.split(".").pop()!.toLowerCase();
+      const type = ext === "jpg" ? "image/jpeg" : ext === "svg" ? "image/svg+xml" : `image/${ext}`;
+      await this.insertImageFile(new File([bytes as Uint8Array<ArrayBuffer>], ref.name, { type }), "over");
+    } catch (e) { toast(`Couldn't read ${ref.name}: ${e}`, true); }
+  }
+
+  async insertImageFile(file: Blob, mode: "cell" | "over") {
+    const d = this.active;
+    if (!d) return;
+    if (this.grid.editing) this.grid.commitEdit();
+    let img: { url: string; w: number; h: number };
+    try { img = await loadImage(file); } catch { toast("That image couldn't be opened", true); return; }
+    const id = d.addImage(img.url);
+    if (mode === "cell") {
+      const r = d.dataRow(d.sel.ar), c = d.sel.ac;
+      const cur = d.style(r, c);
+      d.setCells([{ r, c, v: "", style: d.intern({ ...cur, img: id, check: undefined, list: undefined }) }], "Insert image");
+      this.onChange();
+      return;
+    }
+    // Over cells: natural size, scaled down to fit comfortably.
+    const scale = Math.min(1, 420 / img.w, 300 / img.h);
+    const w = Math.max(24, Math.round(img.w * scale)), h = Math.max(24, Math.round(img.h * scale));
+    this.objects.add({ kind: "image", img: id, ...this.placement(w, h, false), w, h } as Omit<SheetObject, "id">, "Insert image");
+  }
+
+  private insertCheckboxes() {
+    const d = this.active;
+    if (!d) return;
+    if (this.grid.editing) this.grid.commitEdit();
+    const cells: { r: number; c: number; v?: string; style?: number }[] = [];
+    const cache = new Map<number, number>();
+    for (const rect of allRects(d.sel)) {
+      const r1 = this.grid.isWholeCols(rect) ? Math.max(rect.r0, Math.min(rect.r1, Math.max(d.rows.length, 100) - 1)) : rect.r1;
+      if ((r1 - rect.r0 + 1) * (rect.c1 - rect.c0 + 1) > 200_000) { toast("That's too many cells for checkboxes", true); return; }
+      for (let r = rect.r0; r <= r1; r++) {
+        if (d.view && r >= d.view.length) break;
+        const dr = d.dataRow(r);
+        for (let c = rect.c0; c <= rect.c1; c++) {
+          const id = d.styleId(dr, c);
+          let next = cache.get(id);
+          if (next === undefined) { const { list: _l, img: _i, ...rest } = d.styles[id] ?? {}; next = d.intern({ ...rest, check: true }); cache.set(id, next); }
+          const raw = d.raw(dr, c).trim().toUpperCase();
+          cells.push({ r: dr, c, style: next, v: raw === "TRUE" ? "TRUE" : "FALSE" });
+        }
+      }
+    }
+    d.setCells(cells, "Insert checkboxes");
+    this.onChange();
+  }
+
+  /** Set up (or change, or remove) a dropdown on the selected cells. */
+  private dropdownDialog() {
+    const d = this.active;
+    if (!d) return;
+    if (this.grid.editing) this.grid.commitEdit();
+    const existing = d.style(d.dataRow(d.sel.ar), d.sel.ac).list;
+    let options = existing ?? [];
+    if (!options.length) {
+      // Suggest what's already in the selection.
+      const seen = new Set<string>();
+      for (const rect of allRects(d.sel)) for (let r = rect.r0; r <= Math.min(rect.r1, this.grid.lastRow()) && seen.size < 40; r++)
+        for (let c = rect.c0; c <= rect.c1 && seen.size < 40; c++) { const v = d.display(d.dataRow(r), c).trim(); if (v) seen.add(v); }
+      options = seen.size ? [...seen] : ["Option 1", "Option 2"];
+    }
+    const prev = document.activeElement as HTMLElement | null;
+    const area = el("textarea", { class: "options", spellcheck: "false", rows: "7" }) as HTMLTextAreaElement;
+    area.value = options.join("\n");
+    const foot = el("div", { class: "foot" });
+    const box = el("div", { class: "modal dropdown-dialog", role: "dialog" },
+      el("h3", { text: existing ? "Edit dropdown" : "Dropdown" }),
+      el("p", { text: "One choice per line." }),
+      area, foot);
+    const scrim = el("div", { class: "scrim" }, box);
+    const done = (list: string[] | null | undefined) => {
+      scrim.remove();
+      window.removeEventListener("keydown", onKey, true);
+      prev?.focus();
+      if (list === undefined) return;
+      this.applyFormat((s) => ({ ...s, list: list ?? undefined, check: undefined }), list ? (existing ? "Edit dropdown" : "Insert dropdown") : "Remove dropdown");
+      this.grid.focus();
+    };
+    const apply = () => {
+      const list = [...new Set(area.value.split("\n").map((x) => x.trim()).filter(Boolean))];
+      done(list.length ? list : null);
+    };
+    if (existing) {
+      const rm = el("button", { class: "btn danger-text", text: "Remove" });
+      rm.addEventListener("click", () => done(null));
+      foot.append(rm, el("div", { class: "grow" }));
+    }
+    const cancel = el("button", { class: "btn", text: "Cancel" });
+    const ok = el("button", { class: "btn primary", text: "Done" });
+    cancel.addEventListener("click", () => done(undefined));
+    ok.addEventListener("click", apply);
+    foot.append(cancel, ok);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(undefined); }
+      else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); e.stopPropagation(); apply(); }
+      else e.stopPropagation();
+    };
+    window.addEventListener("keydown", onKey, true);
+    document.body.append(scrim);
+    area.focus();
+    area.select();
+  }
+
+  /** The choices of a dropdown cell. */
+  private dropdownMenu(r: number, c: number, x: number, y: number) {
+    const d = this.active;
+    if (!d) return;
+    const dr = d.dataRow(r);
+    const list = d.style(dr, c).list ?? [];
+    const cur = d.display(dr, c);
+    showMenu([
+      ...list.map((v) => ({ label: v, checked: v === cur, action: () => { d.setCells([{ r: dr, c, v }], "Choose"); this.onChange(); } }) as MenuItem),
+      ...(cur ? ["sep", { label: "Clear", action: () => { d.setCells([{ r: dr, c, v: "" }], "Clear"); this.onChange(); } }] as MenuItem[] : []),
+      "sep",
+      { label: "Edit dropdown…", action: () => this.dropdownDialog() },
+    ], x, y, () => this.grid.focus());
+  }
+
+  /* -------------------------------- objects -------------------------------- */
+
+  private objectMenu(o: SheetObject, x: number, y: number) {
+    const L = this.objects;
+    const swatches = (current: string | undefined, apply: (v: string | undefined) => void, tone: "" | "-1" | "-2"): MenuItem[] => {
+      const theme = (document.documentElement.dataset.theme ?? "light") as "light" | "dark" | "dusk";
+      return [
+        { label: "None", checked: !current, action: () => apply(undefined) },
+        "sep",
+        ...HUES.map((h) => {
+          const token = `@${h}${tone}`;
+          return { label: colorLabel(h), checked: current === token, icon: dot(resolveColor(token, theme) ?? "transparent", resolveColor(`@${h}`, theme) ?? "transparent"), action: () => apply(token) } as MenuItem;
+        }),
+      ];
+    };
+    const items: MenuItem[] = [];
+    if (o.kind === "chart") {
+      items.push({ label: "Edit chart…", action: () => this.chartEditor(o) });
+      items.push({ label: "Chart type", children: CHART_TYPES.map(({ type, label }) => ({ label, icon: CHART_ICONS[type], checked: o.chart === type, action: () => L.update(o.id, { chart: type }, "Chart type") }) as MenuItem) });
+      items.push("sep");
+    }
+    if (o.kind === "shape") {
+      items.push({ label: "Edit text", key: "Enter", action: () => L.editText(o.id) });
+      if (o.shape !== "text") {
+        items.push({ label: "Fill colour", children: swatches(o.fill, (v) => L.update(o.id, { fill: v }, "Fill colour"), "-1") });
+        items.push({ label: "Border colour", children: swatches(o.stroke, (v) => L.update(o.id, { stroke: v }, "Border colour"), "") });
+      }
+      items.push({ label: "Text colour", children: swatches(o.color, (v) => L.update(o.id, { color: v }, "Text colour"), "") });
+      items.push("sep");
+    }
+    items.push(
+      { label: "Duplicate", key: "Ctrl+D", action: () => L.duplicate(o.id) },
+      { label: "Bring to front", action: () => L.order(o.id, true) },
+      { label: "Send to back", action: () => L.order(o.id, false) },
+      "sep",
+      { label: "Delete", key: "Delete", danger: true, action: () => L.remove(o.id) },
+    );
+    showMenu(items, x, y);
+  }
+
+  /** A small panel beside a chart: type, data range and title. Changes show live; one undo step. */
+  private chartEditor(o: ChartObject) {
+    const d = this.active;
+    const node = document.querySelector<HTMLElement>(`#objects .obj.selected`);
+    if (!d || !node) return;
+    const before = d.snapshotObjects();
+    const live = () => d.objects.find((x) => x.id === o.id) as ChartObject | undefined;
+    const set = (patch: Partial<ChartObject>) => { const x = live(); if (x) { Object.assign(x, patch); this.grid.invalidate(); } };
+    const types = el("div", { class: "segmented chart-types" });
+    const refresh = () => types.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.type === live()?.chart));
+    for (const { type, label } of CHART_TYPES) {
+      const b = el("button", { title: label, "data-type": type });
+      b.innerHTML = CHART_ICONS[type] + `<span>${label}</span>`;
+      b.addEventListener("click", () => { set({ chart: type }); refresh(); });
+      types.append(b);
+    }
+    refresh();
+    const range = el("input", { class: "field", spellcheck: "false", value: o.range }) as HTMLInputElement;
+    const title = el("input", { class: "field", spellcheck: "false", placeholder: "No title", value: o.title ?? "" }) as HTMLInputElement;
+    range.addEventListener("input", () => {
+      const ok = !!parseRange(range.value);
+      range.classList.toggle("bad", !ok);
+      if (ok) set({ range: range.value.trim().toUpperCase().replace(/\$/g, "") });
+    });
+    title.addEventListener("input", () => set({ title: title.value || undefined }));
+    for (const inp of [range, title]) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); close(); } e.stopPropagation(); });
+    const useSel = el("button", { class: "link", text: "Use selection" });
+    useSel.addEventListener("click", () => {
+      const s = selRect(d.sel);
+      range.value = rangeText({ r0: d.dataRow(s.r0), c0: s.c0, r1: d.dataRow(Math.min(s.r1, this.grid.lastRow())), c1: s.c1 });
+      range.dispatchEvent(new Event("input"));
+    });
+    const panel = el("div", { class: "chart-editor" },
+      el("div", { class: "row" }, types),
+      el("label", {}, el("span", { class: "cap" }, "Data", useSel), range),
+      el("label", {}, el("span", { class: "cap", text: "Title" }), title),
+    );
+    const close = showPopover(node, panel, () => { d.commitObjects(before, "Edit chart"); this.onChange(); });
+    // Sit beside the chart rather than under it.
+    const pop = panel.parentElement as HTMLElement;
+    const a = node.getBoundingClientRect(), p = pop.getBoundingClientRect();
+    let left = a.right + 8;
+    if (left + p.width > window.innerWidth - 8) left = a.left - p.width - 8;
+    if (left < 8) left = Math.min(window.innerWidth - p.width - 8, Math.max(8, a.left + 8));
+    pop.style.left = `${left}px`;
+    pop.style.top = `${Math.max(48, Math.min(a.top, window.innerHeight - p.height - 8))}px`;
+    range.focus();
+    range.select();
   }
 
   private columnMenu(c: number, x: number, y: number) {
@@ -1493,4 +1832,47 @@ function svg(inner: string, size: number, cls = ""): SVGElement {
   const wrap = document.createElement("span");
   wrap.innerHTML = `<svg viewBox="${vb}" width="${size}" height="${size}" class="${cls}" fill="none">${inner}</svg>`;
   return wrap.firstElementChild as SVGElement;
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+
+const CHART_ICONS: Record<ChartType, string> = {
+  column: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M3.5 13V8.5M8 13V3.5M12.5 13V6.5" stroke-width="2.2"/></svg>',
+  bar: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 3.5h4.5M3 8h10M3 12.5h7" stroke-width="2.2"/></svg>',
+  line: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M2.5 11.5 6 7.5l3 2.5 4.5-6"/></svg>',
+  pie: '<svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5V8l4.25 3.5"/></svg>',
+};
+const IMG_ICONS = {
+  cell: '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="m4.5 11 2.5-3 2 2 1.25-1.5L12 11"/></svg>',
+  over: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M2.5 6h11M6 2.5v11" opacity=".45"/><rect x="5" y="5" width="8.5" height="8" rx="1.25"/><path d="m6.5 11.5 2-2.25 1.5 1.5 1-1 1 1.75"/></svg>',
+  text: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4.5h8M8 4.5v8"/></svg>',
+};
+
+/** A small coloured circle for colour menus. */
+function dot(fill: string, ring: string): string {
+  return `<svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="8" r="5.25" fill="${fill}" stroke="${ring}" stroke-width="1.5"/></svg>`;
+}
+
+/** Read a picture, shrinking very large ones so files stay small. */
+async function loadImage(file: Blob): Promise<{ url: string; w: number; h: number }> {
+  const url = await new Promise<string>((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result as string);
+    r.onerror = () => rej(r.error);
+    r.readAsDataURL(file);
+  });
+  const img = new Image();
+  await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error("bad image")); img.src = url; });
+  let w = img.naturalWidth || 300, h = img.naturalHeight || 200;
+  const MAX = 1600;
+  if ((w > MAX || h > MAX || file.size > 1_500_000) && file.type !== "image/svg+xml" && file.type !== "image/gif") {
+    const k = Math.min(1, MAX / Math.max(w, h));
+    w = Math.round(w * k); h = Math.round(h * k);
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    cv.getContext("2d")!.drawImage(img, 0, 0, w, h);
+    const png = file.type === "image/png";
+    return { url: cv.toDataURL(png ? "image/png" : "image/jpeg", 0.88), w, h };
+  }
+  return { url, w, h };
 }

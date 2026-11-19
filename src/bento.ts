@@ -7,7 +7,7 @@
  * sheets. Both are read.
  */
 import { Delimiter, LineEnding } from "./csv";
-import { Book, Doc } from "./doc";
+import { Book, Doc, SheetObject } from "./doc";
 import { Encoding } from "./encoding";
 import { Style } from "./format";
 
@@ -34,6 +34,10 @@ export interface SheetData {
   merges?: [number, number, number, number][];
   filters: Record<string, string[]>;
   csv?: CsvSettings;
+  /** Charts, images, shapes and text boxes. */
+  objects?: SheetObject[];
+  /** Image data by id (only images still in use). */
+  images?: Record<string, string>;
 }
 
 interface CsvSettings { delimiter: Delimiter; lineEnding: LineEnding; encoding: Encoding; bom: boolean }
@@ -85,7 +89,15 @@ export function sheetToData(doc: Doc): SheetData {
     while (out.length && out[out.length - 1] === 0) out.pop();
     cellStyles.push([r, out]);
   }
+  // Images still referenced by an object or a cell style.
+  const usedImages = new Set<string>();
+  for (const o of doc.objects) if (o.kind === "image") usedImages.add(o.img);
+  for (const st of styles) if (st.img) usedImages.add(st.img);
+  const images: Record<string, string> = {};
+  for (const id of usedImages) { const u = doc.images.get(id); if (u) images[id] = u; }
   return {
+    objects: doc.objects.length ? doc.objects.map((o) => ({ ...o })) : undefined,
+    images: usedImages.size ? images : undefined,
     name: doc.sheetName,
     tabColor: doc.tabColor,
     protected: doc.protected || undefined,
@@ -116,6 +128,8 @@ export function sheetFromData(doc: Doc, file: SheetData) {
   if (file.name) doc.sheetName = file.name;
   doc.tabColor = file.tabColor;
   doc.protected = !!file.protected;
+  doc.objects = (file.objects ?? []).map((o) => ({ ...o }));
+  doc.images = new Map(Object.entries(file.images ?? {}));
   // Map file style ids → this doc's ids (interning can merge duplicates).
   const map = (file.styles ?? [{}]).map((s) => doc.intern(s));
   for (const [r, st] of file.cellStyles ?? []) doc.setRowStyleArray(r, st.map((id) => map[id] ?? 0));
