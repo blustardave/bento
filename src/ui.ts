@@ -115,3 +115,35 @@ export function toast(msg: string, error = false) {
   clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => t.remove(), error ? 5000 : 2400);
 }
+
+let openPop: { close: () => void } | null = null;
+
+/** A floating panel under an anchor. Closes on Escape or a click outside. */
+export function showPopover(anchor: HTMLElement, content: HTMLElement, onClose?: () => void): () => void {
+  closeMenus();
+  openPop?.close();
+  const pop = el("div", { class: "panel popover" }, content);
+  document.body.append(pop);
+  const a = anchor.getBoundingClientRect();
+  const r = pop.getBoundingClientRect();
+  pop.style.left = Math.max(6, Math.min(a.left, window.innerWidth - r.width - 6)) + "px";
+  pop.style.top = a.bottom + 4 + "px";
+  anchor.classList.add("open");
+  function onKey(e: KeyboardEvent) { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); } }
+  function onDown(e: PointerEvent) { if (!pop.contains(e.target as Node) && !anchor.contains(e.target as Node)) close(); }
+  function close() {
+    if (!pop.isConnected) return;
+    pop.remove();
+    anchor.classList.remove("open");
+    window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("pointerdown", onDown, true);
+    if (openPop?.close === close) openPop = null;
+    onClose?.();
+  }
+  setTimeout(() => {
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onDown, true);
+  });
+  openPop = { close };
+  return close;
+}

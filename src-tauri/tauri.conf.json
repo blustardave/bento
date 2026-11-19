@@ -44,6 +44,14 @@
     "fileAssociations": [
       {
         "ext": [
+          "bento"
+        ],
+        "name": "Bento sheet",
+        "description": "Bento spreadsheet",
+        "role": "Editor"
+      },
+      {
+        "ext": [
           "csv"
         ],
         "name": "CSV file",

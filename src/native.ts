@@ -12,15 +12,19 @@ export interface FileRef {
   file?: File; // browser fallback only
 }
 
-const FILTERS = [
-  { name: "CSV / TSV", extensions: ["csv", "tsv", "txt", "tab"] },
+const OPEN_FILTERS = [
+  { name: "Sheets", extensions: ["bento", "csv", "tsv", "txt", "tab"] },
   { name: "All files", extensions: ["*"] },
 ];
+const SAVE_FILTERS = {
+  bento: [{ name: "Bento sheet", extensions: ["bento"] }],
+  csv: [{ name: "CSV", extensions: ["csv"] }, { name: "TSV", extensions: ["tsv"] }],
+};
 
 export async function pickFiles(): Promise<FileRef[]> {
   if (isTauri) {
     const { open } = await import("@tauri-apps/plugin-dialog");
-    const res = await open({ multiple: true, filters: FILTERS });
+    const res = await open({ multiple: true, filters: OPEN_FILTERS });
     if (!res) return [];
     const list = Array.isArray(res) ? res : [res];
     return list.map((p) => ({ name: basename(p), path: p }));
@@ -29,7 +33,7 @@ export async function pickFiles(): Promise<FileRef[]> {
     const input = document.createElement("input");
     input.type = "file";
     input.multiple = true;
-    input.accept = ".csv,.tsv,.txt,.tab";
+    input.accept = ".bento,.csv,.tsv,.txt,.tab";
     input.onchange = () => resolve([...(input.files ?? [])].map((f) => ({ name: f.name, path: null, file: f })));
     input.click();
   });
@@ -43,10 +47,10 @@ export async function readFile(ref: FileRef): Promise<Uint8Array> {
 }
 
 /** Ask where to save. Returns a path, or null if cancelled. */
-export async function pickSavePath(suggested: string): Promise<string | null> {
+export async function pickSavePath(suggested: string, kind: "bento" | "csv"): Promise<string | null> {
   if (isTauri) {
     const { save } = await import("@tauri-apps/plugin-dialog");
-    return (await save({ defaultPath: suggested, filters: FILTERS })) ?? null;
+    return (await save({ defaultPath: suggested, filters: SAVE_FILTERS[kind] })) ?? null;
   }
   return suggested;
 }
@@ -57,7 +61,7 @@ export async function writeFile(path: string, bytes: Uint8Array): Promise<void> 
     await invoke("write_file", bytes, { headers: { "x-path": encodeURIComponent(path) } });
     return;
   }
-  const blob = new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "text/csv" });
+  const blob = new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "application/octet-stream" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = basename(path);

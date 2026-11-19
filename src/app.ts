@@ -4,6 +4,7 @@ import { Encoding, decodeBytes, encodeText, encodingLabel } from "./encoding";
 import { openFilter } from "./filter";
 import { FindPanel } from "./find";
 import { Grid } from "./grid";
+import { decodeBento, encodeBento, isBentoPath, looksLikeBento } from "./bento";
 import {
   FileRef, isTauri, launchFiles, onFileDrop, onOpenFiles, pickFiles, pickSavePath, readFile,
   windowControls, writeFile,
@@ -11,6 +12,8 @@ import {
 import { MenuItem, closeMenus, modal, showMenu, toast } from "./ui";
 import { ToolButton, divider, grow, toolButton } from "./toolbar";
 import { ZOOMS } from "./grid";
+import { FormatBar } from "./formatbar";
+import { Style } from "./format";
 import { appVersion, initUpdater } from "./updater";
 import { basename, cellName, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 
@@ -26,6 +29,16 @@ export class App {
   private statsTimer = 0;
   private cellInput = $("cell-input") as HTMLInputElement;
   private tools: Record<string, ToolButton> = {};
+  private formatBar = new FormatBar({
+    active: () => {
+      const d = this.active;
+      if (!d) return null;
+      const r = d.dataRow(d.sel.ar);
+      return { style: d.style(r, d.sel.ac), header: d.freezeHeader && r === 0, shown: d.display(r, d.sel.ac) };
+    },
+    apply: (patch, label) => this.applyFormat(patch, label),
+    theme: () => (document.documentElement.dataset.theme === "dark" ? "dark" : "light"),
+  });
 
   constructor() {
     this.grid = new Grid({
@@ -78,9 +91,16 @@ export class App {
     this.grid.focus();
   }
 
+  /** Every sheet asks the grid to measure tall rows (wrapped text, big fonts). */
+  private makeDoc(name: string, path: string | null): Doc {
+    const d = new Doc(name, path);
+    d.measureRow = (r) => this.grid.measureRow(d, r);
+    return d;
+  }
+
   newDoc() {
     this.untitled++;
-    const d = new Doc(this.untitled === 1 ? "Untitled.csv" : `Untitled ${this.untitled}.csv`, null);
+    const d = this.makeDoc(this.untitled === 1 ? "Untitled.bento" : `Untitled ${this.untitled}.bento`, null);
     d.freezeHeader = true;
     this.docs.push(d);
     this.activate(d);
@@ -95,7 +115,7 @@ export class App {
     for (const ref of refs) {
       const existing = ref.path ? this.docs.find((d) => d.path && d.path.toLowerCase() === ref.path!.toLowerCase()) : null;
       if (existing) { this.activate(existing); continue; }
-      const doc = new Doc(ref.name, ref.path);
+      const doc = this.makeDoc(ref.name, ref.path);
       doc.source = ref;
       doc.loading = 0;
       // Replace a pristine empty "Untitled" tab instead of piling up tabs.
@@ -119,6 +139,17 @@ export class App {
     doc.loading = 0;
     this.renderLoading();
     const bytes = await readFile(ref);
+    if (isBentoPath(ref.name) || looksLikeBento(bytes)) {
+      await decodeBento(bytes, doc);
+      doc.loading = null;
+      if (!doc.widths.size) this.grid.autoFitInitial(doc);
+      doc.remeasureAll();
+      doc.markSaved();
+      if (this.active === doc) this.grid.setDoc(doc);
+      this.render();
+      this.onSelection();
+      return;
+    }
     let dec = decodeBytes(bytes);
     if (opts.encoding && opts.encoding !== dec.encoding) {
       dec = { text: new TextDecoder(opts.encoding).decode(bytes), encoding: opts.encoding, bom: false };
@@ -178,26 +209,54 @@ export class App {
     return true;
   }
 
+  /** Save as a .bento sheet (keeps formatting, formulas, widths…). */
   async save(doc: Doc | null = this.active, saveAs = false): Promise<boolean> {
     if (!doc || doc.loading !== null) return false;
     if (this.grid.editing && this.active === doc) this.grid.commitEdit();
     let path = doc.path;
-    if (!path || saveAs || !isTauri) {
-      path = await pickSavePath(doc.path ?? doc.name);
+    if (!path || !isBentoPath(path) || saveAs || !isTauri) {
+      // A CSV you opened gets a .bento next to it; the CSV is left alone.
+      const suggested = (doc.path ?? doc.name).replace(/\.[^.\\/]+$/, "") + ".bento";
+      path = await pickSavePath(suggested, "bento");
       if (!path) return false;
-      if (/\.tsv$/i.test(path) && doc.delim !== "\t") doc.delim = "\t";
+      if (!isBentoPath(path)) path += ".bento";
     }
+    try {
+      await writeFile(path, await encodeBento(doc));
+      doc.path = path;
+      doc.name = basename(path);
+      if (isTauri) doc.source = { name: doc.name, path };
+      doc.markSaved();
+      this.addRecent(path);
+      this.render();
+      toast(`Saved ${doc.name}`);
+      return true;
+    } catch (e) {
+      toast(String(e instanceof Error ? e.message : e), true);
+      return false;
+    }
+  }
+
+  /** Write a plain CSV copy. The sheet itself stays as it is. */
+  async exportCsv(doc: Doc | null = this.active): Promise<boolean> {
+    if (!doc || doc.loading !== null) return false;
+    if (this.grid.editing && this.active === doc) this.grid.commitEdit();
+    const base = (doc.path ?? doc.name).replace(/\.[^.\\/]+$/, "");
+    let path = await pickSavePath(base + (doc.delim === "\t" ? ".tsv" : ".csv"), "csv");
+    if (!path) return false;
+    if (!/\.(csv|tsv|txt)$/i.test(path)) path += ".csv";
+    const delim = /\.tsv$/i.test(path) ? "\t" as const : doc.delim === "\t" ? "," as const : doc.delim;
     let asValues = false;
     if (doc.hasFormulas()) {
       let mode = doc.saveFormulasAs;
       if (!mode) {
         mode = await modal(
           "This sheet has formulas",
-          "CSV files can't store formulas. Save the calculated values, or keep the formulas as text? (Excel and Google Sheets recalculate formulas saved as text.)",
+          "CSV files can't store formulas. Export the calculated values, or the formulas as text? (Excel and Google Sheets recalculate formulas saved as text.)",
           [
             { label: "Cancel", value: null },
-            { label: "Keep formulas", value: "formulas" as const },
-            { label: "Save values", value: "values" as const, primary: true },
+            { label: "Formulas as text", value: "formulas" as const },
+            { label: "Values", value: "values" as const, primary: true },
           ],
         );
         if (!mode) return false;
@@ -206,15 +265,12 @@ export class App {
       asValues = mode === "values";
     }
     try {
-      const bytes = encodeText(doc.toText(asValues), doc.encoding, doc.bom);
-      await writeFile(path, bytes);
-      doc.path = path;
-      doc.name = basename(path);
-      if (isTauri) doc.source = { name: doc.name, path };
-      doc.markSaved();
-      this.addRecent(path);
-      this.render();
-      toast(`Saved ${doc.name}`);
+      const saved = doc.delim;
+      doc.delim = delim;
+      const text = doc.toText(asValues);
+      doc.delim = saved;
+      await writeFile(path, encodeText(text, doc.encoding, doc.bom));
+      toast(`Exported ${basename(path)}${doc.hasFormatting() ? " (formatting isn't kept in CSV)" : ""}`);
       return true;
     } catch (e) {
       toast(String(e instanceof Error ? e.message : e), true);
@@ -294,7 +350,7 @@ export class App {
     box.append(el("div", { class: "welcome" },
       el("div", { class: "mark" }, svg(LOGO, 44)),
       el("h1", { text: "Bento" }),
-      el("p", { text: "A calm, quick place for your CSV files." }),
+      el("p", { text: "A calm, quick place for your spreadsheets and CSV files." }),
       el("div", { class: "buttons" }, open, blank),
       recent.length ? el("h2", { text: "Recent" }) : null,
       recent.length ? list : null,
@@ -333,9 +389,9 @@ export class App {
       b.addEventListener("click", () => fn(b));
       left.append(el("span", { class: "sep", text: "·" }), b);
     };
-    btn(encodingLabel(d.encoding, d.bom), "Text encoding", (b) => this.encodingMenu(b));
-    btn(delimiterLabel(d.delim), "Delimiter", (b) => this.delimiterMenu(b));
-    btn(d.eol === "\r\n" ? "CRLF" : "LF", "Line endings", (b) => this.eolMenu(b));
+    btn(encodingLabel(d.encoding, d.bom), "Text encoding (for CSV export)", (b) => this.encodingMenu(b));
+    btn(delimiterLabel(d.delim), "Delimiter (for CSV export)", (b) => this.delimiterMenu(b));
+    btn(d.eol === "\r\n" ? "CRLF" : "LF", "Line endings (for CSV export)", (b) => this.eolMenu(b));
     if (d.filters.size) {
       const b = el("button", { class: "item", text: "Clear filters", title: "Show all rows" });
       b.style.color = "var(--accent-text)";
@@ -473,6 +529,8 @@ export class App {
           r.left, r.bottom + 4, () => b.classList.remove("open"));
       } })),
       divider(),
+      ...this.formatBar.build(),
+      divider(),
       t("sortAsc", toolButton({ icon: "sortAsc", title: "Sort column A → Z", onClick: withDoc((d) => { d.sortBy(col(), false); this.afterStructure(); }) })),
       t("sortDesc", toolButton({ icon: "sortDesc", title: "Sort column Z → A", onClick: withDoc((d) => { d.sortBy(col(), true); this.afterStructure(); }) })),
       t("filter", toolButton({ icon: "filter", title: "Filter column", onClick: (b) => withDoc((d) => {
@@ -509,11 +567,30 @@ export class App {
     const ready = !!d && d.loading === null;
     for (const b of Object.values(this.tools)) b.set({ disabled: !ready });
     this.tools.zoom.set({ disabled: false, text: `${Math.round(this.grid.zoom * 100)}%` });
-    if (!ready || !d) return;
+    if (!ready || !d) { this.formatBar.refresh(false); return; }
     this.tools.undo.set({ disabled: !d.canUndo });
     this.tools.redo.set({ disabled: !d.canRedo });
     this.tools.filter.set({ on: d.filters.has(d.sel.ac) });
     this.tools.freeze.set({ on: d.freezeHeader });
+    this.formatBar.refresh(ready);
+  }
+
+  /** Apply a formatting change to every selected cell. */
+  applyFormat(patch: (s: Style) => Style, label: string) {
+    const d = this.active;
+    if (!d || d.loading !== null) return;
+    const s = selRect(d.sel);
+    const count = (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
+    if (count > 5_000_000) { toast("That selection is too big to format in one go", true); return; }
+    const cells: { r: number; c: number }[] = [];
+    for (let r = s.r0; r <= s.r1; r++) {
+      if (d.view && r >= d.view.length) break;
+      const dr = d.dataRow(r);
+      for (let c = s.c0; c <= s.c1; c++) cells.push({ r: dr, c });
+    }
+    d.format(cells, patch, label);
+    this.onChange();
+    this.onSelection();
   }
 
   /**
@@ -556,6 +633,7 @@ export class App {
       "sep",
       { label: "Save", key: "Ctrl+S", disabled: !d, action: () => this.save() },
       { label: "Save as…", key: "Ctrl+Shift+S", disabled: !d, action: () => this.save(d, true) },
+      { label: "Export as CSV…", key: "Ctrl+E", disabled: !d, action: () => this.exportCsv(d) },
       { label: "Close tab", key: "Ctrl+W", disabled: !d, action: () => d && this.closeDoc(d) },
       "sep",
       { label: "Find", key: "Ctrl+F", disabled: !d, action: () => this.find.open(false) },
@@ -589,7 +667,9 @@ export class App {
       "Ctrl+C / X / V  copy, cut, paste  ·  Ctrl+D  fill down",
       "Ctrl+Z / Ctrl+Y  undo, redo  ·  Delete  clear",
       "Ctrl+F / Ctrl+H  find, replace  ·  Ctrl+A  select all",
-      "Ctrl+S  save  ·  Ctrl+O  open  ·  Ctrl+N  new",
+      "Ctrl+B / I / U  bold, italic, underline  ·  Alt+Shift+5  strikethrough",
+      "Ctrl+Shift+L / E / R  align left, centre, right  ·  Ctrl+\\  clear formatting",
+      "Ctrl+S  save (.bento)  ·  Ctrl+E  export CSV  ·  Ctrl+O  open  ·  Ctrl+N  new",
       "Ctrl+Tab  next tab  ·  Ctrl+W  close tab",
       "Formulas start with =, e.g. =SUM(B2:B100)",
     ].join("\n"), [{ label: "Done", value: true, primary: true }]);
@@ -599,10 +679,10 @@ export class App {
     const d = this.active!;
     const r = anchor.getBoundingClientRect();
     const set = (e: Encoding, bom: boolean) => () => { d.encoding = e; d.bom = bom; d.markDirty(); this.render(); };
-    const canReread = !!d.source && !d.dirty;
+    const canReread = !!d.source && !d.dirty && !isBentoPath(d.source.name);
     const reread = (e: Encoding) => () => this.load(d, d.source!, { encoding: e, delim: d.delim }).catch((err) => toast(String(err), true));
     showMenu([
-      { heading: "Save with" },
+      { heading: "Export CSV as" },
       { label: "UTF-8", checked: d.encoding === "utf-8" && !d.bom, action: set("utf-8", false) },
       { label: "UTF-8 with BOM (best for Excel)", checked: d.encoding === "utf-8" && d.bom, action: set("utf-8", true) },
       { label: "Windows-1252", checked: d.encoding === "windows-1252", action: set("windows-1252", false) },
@@ -616,9 +696,9 @@ export class App {
     const d = this.active!;
     const r = anchor.getBoundingClientRect();
     const all: Delimiter[] = [",", ";", "\t", "|"];
-    const canReread = !!d.source && !d.dirty;
+    const canReread = !!d.source && !d.dirty && !isBentoPath(d.source.name);
     showMenu([
-      { heading: "Save with" },
+      { heading: "Export CSV with" },
       ...all.map((x) => ({ label: delimiterLabel(x), checked: d.delim === x, action: () => { d.delim = x; d.markDirty(); this.render(); } })),
       ...(canReread ? ["sep" as const, { heading: "Re-read file split by" } as MenuItem,
         ...all.map((x) => ({ label: delimiterLabel(x), action: () => this.load(d, d.source!, { delim: x, encoding: d.encoding }).catch((err) => toast(String(err), true)) }))] : []),
@@ -706,6 +786,7 @@ export class App {
       ...this.rowItems().slice(0, 1), ...this.colItems().slice(0, 1), "sep",
       this.rowItems()[2], this.colItems()[2],
       { label: "Clear cells", key: "Delete", action: () => this.grid.clear() },
+      { label: "Clear formatting", key: "Ctrl+\\", action: () => this.applyFormat(() => ({}), "Clear formatting") },
       "sep",
       { label: "Fill down", key: "Ctrl+D", action: () => this.grid.fillDown() },
     ], x, y);
@@ -803,6 +884,28 @@ export class App {
       if (ctrl && k === "n") { e.preventDefault(); this.newDoc(); }
       else if (ctrl && k === "o") { e.preventDefault(); this.openDialog(); }
       else if (ctrl && k === "s") { e.preventDefault(); this.save(d, e.shiftKey); }
+      else if (ctrl && !e.shiftKey && k === "e") { e.preventDefault(); this.exportCsv(d); }
+      else if (d && ctrl && !e.shiftKey && (k === "b" || k === "i" || k === "u")) {
+        e.preventDefault();
+        if (this.grid.editing) this.grid.commitEdit();
+        const key = k === "b" ? "b" : k === "i" ? "i" : "u";
+        const r = d.dataRow(d.sel.ar);
+        const st = d.style(r, d.sel.ac);
+        const header = d.freezeHeader && r === 0;
+        const on = !!(st[key] ?? (key === "b" && header));
+        this.applyFormat((s) => ({ ...s, [key]: on ? (key === "b" && header ? false : undefined) : true }), key === "b" ? "Bold" : key === "i" ? "Italic" : "Underline");
+      }
+      else if (d && e.altKey && e.shiftKey && (e.key === "%" || e.code === "Digit5")) {
+        e.preventDefault();
+        const on = !!d.style(d.dataRow(d.sel.ar), d.sel.ac).s;
+        this.applyFormat((s) => ({ ...s, s: on ? undefined : true }), "Strikethrough");
+      }
+      else if (d && ctrl && e.shiftKey && (k === "l" || k === "e" || k === "r")) {
+        e.preventDefault();
+        const ha = k === "l" ? "l" : k === "e" ? "c" : "r";
+        this.applyFormat((s) => ({ ...s, ha }), "Align");
+      }
+      else if (d && ctrl && e.key === "\\") { e.preventDefault(); this.applyFormat(() => ({}), "Clear formatting"); }
       else if (ctrl && k === "w") { e.preventDefault(); if (d) this.closeDoc(d); }
       else if (ctrl && k === "f") { e.preventDefault(); if (d) this.find.open(false); }
       else if (ctrl && k === "h") { e.preventDefault(); if (d) this.find.open(true); }

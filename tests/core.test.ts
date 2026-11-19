@@ -3,6 +3,8 @@ import { decodeBytes, encodeText } from "../src/encoding";
 import { Engine, shiftFormula } from "../src/formula";
 import { Doc } from "../src/doc";
 import { parseNum, colName, colIndex } from "../src/util";
+import { applyNumFmt, parseDate, formatDate } from "../src/format";
+import { encodeBento, decodeBento } from "../src/bento";
 
 let fails = 0;
 function eq(a: unknown, b: unknown, msg: string) {
@@ -63,6 +65,32 @@ doc.setFilter(1, new Set(["a"]));
 eq(Array.from(doc.view!), [0,1,3], "filter");
 doc.redo();
 eq(doc.toText(false), "h1,h2,\r\n2,b,=A2*2\r\n1,a,\r\n10,c,\r\n", "toText keeps ragged as rectangle");
+
+// Number formats
+eq([applyNumFmt("1234.5", {k:"cur",cur:"£",dp:2,sep:true}), applyNumFmt("-3", {k:"cur",cur:"$"}), applyNumFmt("0.256", {k:"pct",dp:1}), applyNumFmt("1234.5678", {k:"num",dp:2,sep:true}), applyNumFmt("abc", {k:"num",dp:2})],
+  ["£1,234.50","-$3.00","25.6%","1,234.57","abc"], "number formats");
+eq([formatDate(parseDate("2026-01-04")!, "long"), formatDate(parseDate("31/01/2026")!, "iso"), formatDate(parseDate("46026")!, "dmy")], ["4 Jan 2026","2026-01-31","04/01/2026"], "dates");
+
+// Formatting moves with rows, undoes, and survives .bento
+const fd = new Doc("f", null);
+fd.load([["h"],["b"],["a"],["c"]]);
+fd.format([{r:1,c:0}], (s)=>({...s, b:true, color:"@red"}));
+fd.sortBy(0, false);
+eq([fd.raw(2,0), fd.style(2,0).b, fd.style(1,0).b], ["b", true, undefined], "style follows row on sort");
+fd.insertCols(0, 1);
+eq(fd.style(2,1).color, "@red", "style shifts with column insert");
+fd.undo(); fd.undo();
+eq(fd.style(1,0).b, true, "undo sort+insert");
+fd.undo();
+eq(fd.hasFormatting(), false, "undo format");
+fd.redo();
+(async () => {
+  const bytes = await encodeBento(fd);
+  const back = new Doc("g", null);
+  await decodeBento(bytes, back);
+  eq([back.rows.length, back.style(1,0).color, back.style(2,0).b], [4, "@red", undefined], "bento round trip");
+    if (fails) process.exit(1);
+})();
 
 // Big parse timing
 let big = "id,name,value,date,note\n";

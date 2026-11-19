@@ -17,6 +17,22 @@ export const ICONS = {
   sum: '<path d="M11.75 3.5h-7.5L8.5 8l-4.25 4.5h7.5"/>',
   search: '<circle cx="7" cy="7" r="4.25"/><path d="M10.25 10.25 13.25 13.25"/>',
   caret: '<path d="M4.5 6.5 8 10l3.5-3.5"/>',
+  alignL: '<path d="M2.75 3.5h10.5M2.75 6.5h6.5M2.75 9.5h10.5M2.75 12.5h6.5"/>',
+  alignC: '<path d="M2.75 3.5h10.5M4.75 6.5h6.5M2.75 9.5h10.5M4.75 12.5h6.5"/>',
+  alignR: '<path d="M2.75 3.5h10.5M6.75 6.5h6.5M2.75 9.5h10.5M6.75 12.5h6.5"/>',
+  vTop: '<path d="M2.75 2.75h10.5M8 13.25V5.75M5.5 8.25 8 5.75l2.5 2.5"/>',
+  vMid: '<path d="M2.75 8h10.5M8 2.25v3.25M6.25 3.75 8 5.5l1.75-1.75M8 13.75V10.5M6.25 12.25 8 10.5l1.75 1.75"/>',
+  vBot: '<path d="M2.75 13.25h10.5M8 2.75v7.5M5.5 7.75 8 10.25l2.5-2.5"/>',
+  wrapOverflow: '<path d="M2.75 3v10M10.5 3v3M10.5 10v3M5 8h8.5M11.5 6l2 2-2 2"/>',
+  wrapWrap: '<path d="M2.75 3v10M13.25 3v10M5.25 4.75h4.5a2.25 2.25 0 0 1 0 4.5h-3M8.25 7.75l-1.5 1.5 1.5 1.5M5.25 12.25h2.5"/>',
+  wrapClip: '<path d="M2.75 3v10M10.5 3v10M5 8h5.5"/>',
+  textColor: '<path d="M4.75 10.5 8 2.75l3.25 7.75M6 7.75h4"/><rect class="swatch" x="2.5" y="12.5" width="11" height="2.25" rx="0.75"/>',
+  fill: '<path d="M3.25 6.75 7 3l4.25 4.25-3.6 3.6a1 1 0 0 1-1.4 0L3.25 8.15a1 1 0 0 1 0-1.4ZM3.5 7.25h7.5M12.5 7.75s1 1.15 1 1.75a1 1 0 0 1-2 0c0-.6 1-1.75 1-1.75Z"/><rect class="swatch" x="2.5" y="12.5" width="11" height="2.25" rx="0.75"/>',
+  arrowL: '<path d="M10 8H4.5M6.5 6 4.5 8l2 2"/>',
+  arrowR: '<path d="M4 8h5.5M7.5 6l2 2-2 2"/>',
+  minus: '<path d="M4 8h8"/>',
+  plus: '<path d="M8 4v8M4 8h8"/>',
+  clearFormat: '<path d="M4 3.25h8M8 3.25 6 12.75M3 13.25l10-10" />',
 };
 
 export type IconName = keyof typeof ICONS;
@@ -29,18 +45,23 @@ export function icon(name: IconName, size = 16): SVGElement {
 
 export interface ToolButton {
   el: HTMLButtonElement;
-  set(state: { disabled?: boolean; on?: boolean; text?: string }): void;
+  set(state: { disabled?: boolean; on?: boolean; text?: string; icon?: IconName; swatch?: string | null }): void;
 }
 
 export function toolButton(opts: {
   icon?: IconName;
   text?: string;
+  /** A styled letter (B, I, U, S) instead of an icon. */
+  glyph?: string;
+  glyphClass?: string;
   title: string;
   caret?: boolean;
   onClick: (b: HTMLButtonElement) => void;
 }): ToolButton {
   const b = el("button", { class: "tb", title: opts.title, "aria-label": opts.title });
-  if (opts.icon) b.append(icon(opts.icon));
+  let ico: SVGElement | null = opts.icon ? icon(opts.icon) : null;
+  if (ico) b.append(ico);
+  if (opts.glyph) b.append(el("span", { class: "glyph " + (opts.glyphClass ?? ""), text: opts.glyph }));
   const txt = opts.text !== undefined ? el("span", { class: "txt", text: opts.text }) : null;
   if (txt) b.append(txt);
   if (opts.caret) { const c = icon("caret", 10); c.classList.add("caret"); b.append(c); }
@@ -53,6 +74,11 @@ export function toolButton(opts: {
       if (s.disabled !== undefined) b.disabled = s.disabled;
       if (s.on !== undefined) b.classList.toggle("on", s.on);
       if (s.text !== undefined && txt) txt.textContent = s.text;
+      if (s.icon && ico) { const n = icon(s.icon); ico.replaceWith(n); ico = n; }
+      if (s.swatch !== undefined && ico) {
+        const sw = ico.querySelector<SVGRectElement>(".swatch");
+        if (sw) { sw.style.fill = s.swatch ?? "transparent"; sw.style.stroke = s.swatch ? "none" : "currentColor"; sw.style.strokeWidth = "1"; }
+      }
     },
   };
 }

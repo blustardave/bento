@@ -1,6 +1,7 @@
 import { Delimiter, LineEnding, serialize } from "./csv";
 import { Encoding } from "./encoding";
 import { Engine, shiftFormula } from "./formula";
+import { Style, isEmptyStyle, styleKey } from "./format";
 import { parseNum } from "./util";
 
 /** Selection in *display* coordinates (what's on screen, after filtering). */
@@ -29,6 +30,12 @@ interface Op {
 }
 
 interface CellChange { r: number; c: number; before: string; after: string }
+
+/** A cell edit: a new value, a new style id, or both. */
+export interface CellSet { r: number; c: number; v?: string; style?: number }
+interface FullChange { r: number; c: number; vb?: string; va?: string; sb?: number; sa?: number }
+
+const NO_STYLE: Style = Object.freeze({}) as Style;
 
 const MAX_UNDO = 300;
 let nextId = 1;
@@ -67,6 +74,20 @@ export class Doc {
   saveFormulasAs: "values" | "formulas" | null = null;
   /** Where the file came from, so it can be re-read with other settings. */
   source: import("./native").FileRef | null = null;
+
+  /**
+   * Formatting lives beside each row (keyed by the row array itself), so it
+   * travels with the row through sorting, inserting and deleting.
+   */
+  private rowStyles = new WeakMap<string[], number[]>();
+  /** Rows taller than default (wrapped text, big fonts), unzoomed px. */
+  private rowHeights = new WeakMap<string[], number>();
+  tallRows = 0;
+  /** Style table: id → style. Id 0 is "no formatting". */
+  styles: Style[] = [NO_STYLE];
+  private styleIds = new Map<string, number>([["{}", 0]]);
+  /** Set by the grid: measures how tall a row needs to be. */
+  measureRow: ((r: number) => number) | null = null;
 
   readonly engine: Engine;
   private undoStack: Op[] = [];
@@ -207,21 +228,134 @@ export class Doc {
 
   /* ------------------------------ edits ------------------------------ */
 
-  /** Set many cells at once (data coordinates) as one undoable step. */
-  setCells(cells: { r: number; c: number; v: string }[], label = "Edit", selAfter?: Sel) {
-    const changes: CellChange[] = [];
-    for (const { r, c, v } of cells) {
-      const before = this.raw(r, c);
-      if (before !== v) changes.push({ r, c, before, after: v });
+  /** Set many cells' values and/or styles (data coordinates) as one undoable step. */
+  setCells(cells: CellSet[], label = "Edit", selAfter?: Sel) {
+    const changes: FullChange[] = [];
+    for (const { r, c, v, style } of cells) {
+      const ch: FullChange = { r, c };
+      let any = false;
+      if (v !== undefined) { const before = this.raw(r, c); if (before !== v) { ch.vb = before; ch.va = v; any = true; } }
+      if (style !== undefined) { const before = this.styleId(r, c); if (before !== style) { ch.sb = before; ch.sa = style; any = true; } }
+      if (any) changes.push(ch);
     }
     if (!changes.length) return;
+    const remeasure = () => this.remeasure(changes.filter((ch) => ch.sa !== undefined || this.styleId(ch.r, ch.c) !== 0).map((ch) => ch.r));
     this.push({
       label,
       selBefore: { ...this.sel },
       selAfter,
-      run: () => { for (const ch of changes) this.put(ch.r, ch.c, ch.after); },
-      undo: () => { for (let i = changes.length - 1; i >= 0; i--) { const ch = changes[i]; this.put(ch.r, ch.c, ch.before); } },
+      run: () => {
+        for (const ch of changes) {
+          if (ch.va !== undefined) this.put(ch.r, ch.c, ch.va);
+          if (ch.sa !== undefined) this.putStyle(ch.r, ch.c, ch.sa);
+        }
+        remeasure();
+      },
+      undo: () => {
+        for (let i = changes.length - 1; i >= 0; i--) {
+          const ch = changes[i];
+          if (ch.vb !== undefined) this.put(ch.r, ch.c, ch.vb);
+          if (ch.sb !== undefined) this.putStyle(ch.r, ch.c, ch.sb);
+        }
+        remeasure();
+      },
     });
+  }
+
+  /* ----------------------------- formatting ----------------------------- */
+
+  styleId(r: number, c: number): number {
+    const row = this.rows[r];
+    if (!row) return 0;
+    const st = this.rowStyles.get(row);
+    return st ? st[c] ?? 0 : 0;
+  }
+
+  style(r: number, c: number): Style {
+    return this.styles[this.styleId(r, c)] ?? NO_STYLE;
+  }
+
+  /** The style's id in this sheet's table (adding it if new). */
+  intern(s: Style): number {
+    if (isEmptyStyle(s)) return 0;
+    const k = styleKey(s);
+    let id = this.styleIds.get(k);
+    if (id === undefined) {
+      id = this.styles.length;
+      this.styles.push(JSON.parse(k));
+      this.styleIds.set(k, id);
+    }
+    return id;
+  }
+
+  /** Change formatting of the given data cells with `patch`, as one undo step. */
+  format(cells: { r: number; c: number }[], patch: (s: Style) => Style, label = "Format") {
+    const cache = new Map<number, number>();
+    const sets: CellSet[] = [];
+    for (const { r, c } of cells) {
+      const cur = this.styleId(r, c);
+      let next = cache.get(cur);
+      if (next === undefined) {
+        const p = patch({ ...this.styles[cur] });
+        for (const k of Object.keys(p) as (keyof Style)[]) if (p[k] === undefined) delete p[k];
+        next = this.intern(p);
+        cache.set(cur, next);
+      }
+      sets.push({ r, c, style: next });
+    }
+    this.setCells(sets, label);
+  }
+
+  hasFormatting(): boolean {
+    for (const row of this.rows) { const st = this.rowStyles.get(row); if (st && st.some((x) => x)) return true; }
+    return false;
+  }
+
+  private putStyle(r: number, c: number, id: number) {
+    while (this.rows.length <= r) this.rows.push([]);
+    const row = this.rows[r];
+    let st = this.rowStyles.get(row);
+    if (!st) { if (!id) return; st = []; this.rowStyles.set(row, st); }
+    while (st.length < c) st.push(0);
+    st[c] = id;
+  }
+
+  /** Style ids for a row (read-only use), if it has any. */
+  rowStyleArray(r: number): number[] | undefined {
+    const row = this.rows[r];
+    return row ? this.rowStyles.get(row) : undefined;
+  }
+
+  setRowStyleArray(r: number, st: number[]) {
+    while (this.rows.length <= r) this.rows.push([]);
+    this.rowStyles.set(this.rows[r], st);
+  }
+
+  /** Height of a data row in unzoomed px (0 = default). */
+  rowHeight(r: number): number {
+    const row = this.rows[r];
+    return row ? this.rowHeights.get(row) ?? 0 : 0;
+  }
+
+  /** Re-measure rows whose content or formatting changed. */
+  remeasure(rows: Iterable<number>) {
+    if (!this.measureRow) return;
+    for (const r of new Set(rows)) {
+      const row = this.rows[r];
+      if (!row) continue;
+      const h = this.rowStyles.has(row) ? this.measureRow(r) : 0;
+      const had = this.rowHeights.has(row);
+      if (h > 0) { if (!had) this.tallRows++; this.rowHeights.set(row, h); }
+      else if (had) { this.tallRows--; this.rowHeights.delete(row); }
+    }
+  }
+
+  /** Re-measure every formatted row (after a column resize or on load). */
+  remeasureAll() {
+    const rows: number[] = [];
+    for (let r = 0; r < this.rows.length; r++) if (this.rowStyles.has(this.rows[r])) rows.push(r);
+    this.remeasure(rows);
+    this.version++;
   }
 
   /** Rewrite formulas after a structural change; returns what changed. */
@@ -314,7 +448,12 @@ export class Doc {
         oldCols = this.cols;
         oldKeep = this.keepCols;
         const blanks = new Array<string>(n).fill("");
-        for (const row of this.rows) if (row.length > at) row.splice(at, 0, ...blanks);
+        const zeros = new Array<number>(n).fill(0);
+        for (const row of this.rows) {
+          if (row.length > at) row.splice(at, 0, ...blanks);
+          const st = this.rowStyles.get(row);
+          if (st && st.length > at) st.splice(at, 0, ...zeros);
+        }
         if (this.cols > at || at < this.keepCols) this.cols += n;
         this.keepCols = Math.max(this.keepCols, at) + n;
         shiftMeta(1);
@@ -322,7 +461,11 @@ export class Doc {
       },
       undo: () => {
         this.restore(fx);
-        for (const row of this.rows) if (row.length > at) row.splice(at, n);
+        for (const row of this.rows) {
+          if (row.length > at) row.splice(at, n);
+          const st = this.rowStyles.get(row);
+          if (st && st.length > at) st.splice(at, n);
+        }
         this.cols = oldCols;
         this.keepCols = oldKeep;
         shiftMeta(-1);
@@ -332,6 +475,7 @@ export class Doc {
 
   deleteCols(at: number, n: number) {
     let removed: (string[] | null)[] = [];
+    let removedSt: (number[] | null)[] = [];
     let fx: CellChange[] = [];
     let oldCols = 0;
     let oldKeep = 0;
@@ -344,6 +488,7 @@ export class Doc {
         oldKeep = this.keepCols;
         oldMeta = [this.widths, this.hidden, this.filters];
         removed = this.rows.map((row) => (row.length > at ? row.splice(at, n) : null));
+        removedSt = this.rows.map((row) => { const st = this.rowStyles.get(row); return st && st.length > at ? st.splice(at, n) : null; });
         this.cols = Math.max(0, this.cols - Math.max(0, Math.min(n, this.cols - at)));
         this.keepCols = Math.max(0, this.keepCols - Math.max(0, Math.min(n, this.keepCols - at)));
         const drop = (k: number) => k >= at && k < at + n;
@@ -355,7 +500,10 @@ export class Doc {
       },
       undo: () => {
         this.restore(fx);
-        this.rows.forEach((row, i) => { const rm = removed[i]; if (rm) row.splice(at, 0, ...rm); });
+        this.rows.forEach((row, i) => {
+          const rm = removed[i]; if (rm) row.splice(at, 0, ...rm);
+          const rs = removedSt[i]; if (rs) this.rowStyles.get(row)!.splice(at, 0, ...rs);
+        });
         this.cols = oldCols;
         this.keepCols = oldKeep;
         if (oldMeta) [this.widths, this.hidden, this.filters] = oldMeta;
@@ -444,6 +592,11 @@ export class Doc {
   /** Load parsed rows (from a file). Not undoable. */
   load(rows: string[][]) {
     this.rows = rows;
+    this.rowStyles = new WeakMap();
+    this.rowHeights = new WeakMap();
+    this.tallRows = 0;
+    this.styles = [NO_STYLE];
+    this.styleIds = new Map([["{}", 0]]);
     let cols = 0;
     for (const row of rows) if (row.length > cols) cols = row.length;
     this.cols = cols;

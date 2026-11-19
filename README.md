@@ -1,6 +1,6 @@
 # Bento
 
-A minimal, fast CSV viewer and editor for Windows, with light and dark modes.
+A minimal, fast spreadsheet and CSV editor for Windows, with light and dark modes.
 
 ## Install
 
@@ -8,7 +8,14 @@ Open the [Releases](../../releases) page, download the newest **Bento_x.x.x_x64-
 
 Every push to `main` builds a fresh installer automatically (see `.github/workflows/build.yml`).
 
+## Files
+
+- **`.bento`** is Bento's own format: it keeps the data plus formatting, formulas, column widths, the frozen header and filters. It's gzip-compressed JSON, often smaller than the CSV it came from. **Ctrl+S** always saves a `.bento`.
+- **CSV/TSV** files open as normal. Saving one creates a `.bento` beside it and leaves the original untouched. **Export as CSV…** (Ctrl+E) writes a plain CSV at any time, using the encoding, delimiter and line endings shown in the status bar.
+
 ## What it does
+
+- Formatting: bold, italic, underline, strikethrough; text and fill colours (a palette with light and dark versions of each colour, plus custom colours); horizontal and vertical alignment; overflow/wrap/clip; font size; number formats (currency £/$/€, percent, decimal places, thousands separators, dates).
 
 - Opens CSV/TSV files of a million rows or more and scrolls them smoothly. Only the visible cells are drawn.
 - Works out the delimiter, encoding (UTF-8, UTF-8 BOM, UTF-16, Windows-1252) and line endings, and keeps them when you save. You can change any of them from the status bar.
@@ -22,7 +29,7 @@ Every push to `main` builds a fresh installer automatically (see `.github/workfl
 - The status bar shows Sum, Avg and Count for the selection.
 - Tabs, recent files, drag-and-drop, and a single window (opening another file adds a tab).
 
-CSV can't store formulas, so when you save Bento asks whether to write the calculated values or keep the formulas as text.
+CSV can't store formulas, so when you export Bento asks whether to write the calculated values or keep the formulas as text.
 
 ## Develop
 
