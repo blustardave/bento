@@ -1,7 +1,7 @@
 import { el } from "./util";
 
 export type MenuItem =
-  | { label: string; key?: string; action?: () => void; disabled?: boolean; checked?: boolean; danger?: boolean }
+  | { label: string; key?: string; action?: () => void; disabled?: boolean; checked?: boolean; danger?: boolean; font?: string }
   | { heading: string }
   | "sep";
 
@@ -22,7 +22,7 @@ export function showMenu(items: MenuItem[], x: number, y: number, onClose?: () =
     if ("heading" in it) { menu.append(el("div", { class: "heading", text: it.heading })); continue; }
     const b = el("button", { class: "item" + (it.danger ? " danger" : ""), role: "menuitem" },
       hasChecks ? el("span", { class: "check", text: it.checked ? "✓" : "" }) : null,
-      el("span", { class: "label", text: it.label }),
+      el("span", { class: "label", text: it.label, ...(it.font ? { style: `font-family: "${it.font}", var(--font-ui)` } : {}) }),
       it.key ? el("span", { class: "key", text: it.key }) : null,
     );
     if (it.disabled) b.disabled = true;

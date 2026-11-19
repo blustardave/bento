@@ -83,6 +83,8 @@ export class Doc {
   /** Rows taller than default (wrapped text, big fonts), unzoomed px. */
   private rowHeights = new WeakMap<string[], number>();
   tallRows = 0;
+  /** Merged ranges, in data coordinates. */
+  merges: Rect[] = [];
   /** Style table: id → style. Id 0 is "no formatting". */
   styles: Style[] = [NO_STYLE];
   private styleIds = new Map<string, number>([["{}", 0]]);
@@ -193,7 +195,16 @@ export class Doc {
   }
 
   private push(op: Op) {
+    // Every step remembers the merges before and after, so undo/redo of
+    // structural changes puts merged cells back exactly.
+    const mBefore = this.merges.map((m) => ({ ...m }));
+    let mAfter: Rect[] = [];
+    const run = op.run, undo = op.undo;
+    op.run = () => { run(); };
+    op.undo = () => { undo(); this.merges = mBefore.map((m) => ({ ...m })); };
     op.run();
+    mAfter = this.merges.map((m) => ({ ...m }));
+    op.run = () => { run(); this.merges = mAfter.map((m) => ({ ...m })); };
     this.undoStack.push(op);
     if (this.undoStack.length > MAX_UNDO) {
       const dropped = this.undoStack.shift();
@@ -358,6 +369,61 @@ export class Doc {
     this.version++;
   }
 
+  /* ------------------------------- merges ------------------------------- */
+
+  /** The merged range containing a data cell, if any. */
+  mergeAt(r: number, c: number): Rect | null {
+    for (const m of this.merges) if (r >= m.r0 && r <= m.r1 && c >= m.c0 && c <= m.c1) return m;
+    return null;
+  }
+
+  /** Merge a data range: keeps the top-left value, clears the rest. */
+  merge(rect: Rect) {
+    if (rect.r0 === rect.r1 && rect.c0 === rect.c1) return;
+    const cleared: { r: number; c: number; v: string }[] = [];
+    for (let r = rect.r0; r <= rect.r1; r++) for (let c = rect.c0; c <= rect.c1; c++) {
+      if (r === rect.r0 && c === rect.c0) continue;
+      const v = this.raw(r, c);
+      if (v !== "") cleared.push({ r, c, v });
+    }
+    this.push({
+      label: "Merge cells",
+      selBefore: { ...this.sel },
+      run: () => {
+        this.merges = this.merges.filter((m) => !overlaps(m, rect));
+        this.merges.push({ ...rect });
+        for (const { r, c } of cleared) this.put(r, c, "");
+      },
+      undo: () => { for (const { r, c, v } of cleared) this.put(r, c, v); },
+    });
+  }
+
+  /** Remove merges that touch a data range. */
+  unmerge(rect: Rect) {
+    if (!this.merges.some((m) => overlaps(m, rect))) return;
+    this.push({
+      label: "Unmerge cells",
+      selBefore: { ...this.sel },
+      run: () => { this.merges = this.merges.filter((m) => !overlaps(m, rect)); },
+      undo: () => {},
+    });
+  }
+
+  /** Re-map merges through a row/column index change (kept → new index, removed → -1). */
+  private remapMerges(axis: "row" | "col", map: (i: number) => number) {
+    const out: Rect[] = [];
+    for (const m of this.merges) {
+      const a0 = axis === "row" ? m.r0 : m.c0, a1 = axis === "row" ? m.r1 : m.c1;
+      let n0 = -1, n1 = -1;
+      for (let i = a0; i <= a1; i++) { const j = map(i); if (j >= 0) { if (n0 < 0) n0 = j; n1 = j; } }
+      if (n0 < 0) continue;
+      const nm = axis === "row" ? { ...m, r0: n0, r1: n1 } : { ...m, c0: n0, c1: n1 };
+      if (nm.r0 === nm.r1 && nm.c0 === nm.c1) continue;
+      out.push(nm);
+    }
+    this.merges = out;
+  }
+
   /** Rewrite formulas after a structural change; returns what changed. */
   private shiftFormulas(axis: "row" | "col", at: number, delta: number): CellChange[] {
     const out: CellChange[] = [];
@@ -395,6 +461,7 @@ export class Doc {
         this.rows = [...this.rows.slice(0, at), ...fresh, ...this.rows.slice(at)];
         this.keepRows = Math.max(this.keepRows, 0) + n;
         fx = this.shiftFormulas("row", at, n);
+        this.merges = this.merges.map((m) => m.r0 >= at ? { ...m, r0: m.r0 + n, r1: m.r1 + n } : m.r1 >= at ? { ...m, r1: m.r1 + n } : m);
         this.refreshView();
       },
       undo: () => { this.restore(fx); this.rows = before; this.keepRows -= n; },
@@ -414,6 +481,13 @@ export class Doc {
         before = this.rows;
         const drop = new Set(idx);
         this.rows = this.rows.filter((_, i) => !drop.has(i));
+        const asc = [...idx].reverse();
+        this.remapMerges("row", (i) => {
+          if (drop.has(i)) return -1;
+          let lo = 0, hi = asc.length; // count deleted rows below i
+          while (lo < hi) { const m = (lo + hi) >> 1; if (asc[m] < i) lo = m + 1; else hi = m; }
+          return i - lo;
+        });
         this.keepRows = Math.max(0, this.keepRows - idx.length);
         // Shift formula refs one contiguous block at a time, from the bottom up.
         fx = [];
@@ -458,6 +532,7 @@ export class Doc {
         this.keepCols = Math.max(this.keepCols, at) + n;
         shiftMeta(1);
         fx = this.shiftFormulas("col", at, n);
+        this.merges = this.merges.map((m) => m.c0 >= at ? { ...m, c0: m.c0 + n, c1: m.c1 + n } : m.c1 >= at ? { ...m, c1: m.c1 + n } : m);
       },
       undo: () => {
         this.restore(fx);
@@ -496,6 +571,7 @@ export class Doc {
         this.hidden = shiftSet(new Set([...this.hidden].filter((k) => !drop(k))), at + n, -n);
         this.filters = shiftMap(new Map([...this.filters].filter(([k]) => !drop(k))), at + n, -n);
         fx = this.shiftFormulas("col", at, -n);
+        this.remapMerges("col", (i) => (i < at ? i : i < at + n ? -1 : i - n));
         this.refreshView();
       },
       undo: () => {
@@ -512,9 +588,11 @@ export class Doc {
   }
 
   /** Sort rows by a column. Numbers sort numerically, blanks always last. */
-  sortBy(col: number, desc: boolean) {
+  /** Returns false (and does nothing) if merged cells span rows in the sorted area. */
+  sortBy(col: number, desc: boolean): boolean {
     const start = this.freezeHeader ? 1 : 0;
-    if (this.rows.length - start < 2) return;
+    if (this.rows.length - start < 2) return true;
+    if (this.merges.some((m) => m.r1 >= start && m.r1 > m.r0)) return false;
     let before: string[][] = [];
     this.push({
       label: "Sort",
@@ -537,10 +615,21 @@ export class Doc {
           return coll.compare(a.s, b.s) * dir;
         });
         this.rows = [...this.rows.slice(0, start), ...keys.map((k) => k.row)];
+        // Single-row merges travel with their rows.
+        if (this.merges.length) {
+          const pos = new Map<string[], number>();
+          this.rows.forEach((row, i) => pos.set(row, i));
+          this.merges = this.merges.map((m) => {
+            if (m.r0 < start) return m;
+            const r = pos.get(before[m.r0]) ?? m.r0;
+            return { ...m, r0: r, r1: r };
+          });
+        }
         this.refreshView();
       },
       undo: () => { this.rows = before; },
     });
+    return true;
   }
 
   /* ----------------------------- filters ----------------------------- */
@@ -597,6 +686,7 @@ export class Doc {
     this.tallRows = 0;
     this.styles = [NO_STYLE];
     this.styleIds = new Map([["{}", 0]]);
+    this.merges = [];
     let cols = 0;
     for (const row of rows) if (row.length > cols) cols = row.length;
     this.cols = cols;
@@ -607,6 +697,10 @@ export class Doc {
     this.savedAt = null;
     this.changed();
   }
+}
+
+function overlaps(a: Rect, b: Rect): boolean {
+  return a.r0 <= b.r1 && b.r0 <= a.r1 && a.c0 <= b.c1 && b.c0 <= a.c1;
 }
 
 function shiftMap<V>(m: Map<number, V>, at: number, delta: number): Map<number, V> {

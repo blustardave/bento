@@ -8,9 +8,10 @@ export type HAlign = "l" | "c" | "r";
 export type VAlign = "t" | "m" | "b";
 export type Wrap = "overflow" | "wrap" | "clip";
 export type DateFmt = "iso" | "dmy" | "mdy" | "long";
+export type Rotation = "stack" | "up";
 
 export interface NumFmt {
-  k: "num" | "pct" | "cur" | "date";
+  k: "num" | "pct" | "cur" | "date" | "text";
   dp?: number;     // decimal places (undefined = as typed)
   sep?: boolean;   // thousands separators
   cur?: string;    // currency symbol
@@ -28,8 +29,14 @@ export interface Style {
   va?: VAlign;
   wrap?: Wrap;
   size?: number;   // points (default 10)
+  font?: string;   // family name (default: the UI font)
+  rot?: Rotation;
   nf?: NumFmt;
 }
+
+/** Fonts offered in the toolbar; all ship with Windows (Source Serif is bundled). */
+export const FONTS = ["Segoe UI", "Arial", "Calibri", "Cambria", "Georgia", "Times New Roman", "Verdana", "Consolas", "Source Serif 4"];
+export const DEFAULT_FONT = "Segoe UI";
 
 export const DEFAULT_SIZE = 10;
 export const FONT_SIZES = [6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
@@ -99,7 +106,7 @@ function fixed(n: number, dp: number | undefined, sep: boolean): string {
 
 /** Apply a number format to a cell's displayed text. Non-numbers pass through. */
 export function applyNumFmt(text: string, nf: NumFmt | undefined): string {
-  if (!nf || text === "") return text;
+  if (!nf || text === "" || nf.k === "text") return text;
   if (nf.k === "date") {
     const d = parseDate(text);
     return d ? formatDate(d, nf.date ?? "iso") : text;
@@ -111,9 +118,43 @@ export function applyNumFmt(text: string, nf: NumFmt | undefined): string {
     case "pct": return fixed(n * 100, nf.dp ?? 2, nf.sep ?? false) + "%";
     case "cur": {
       const body = fixed(Math.abs(n), nf.dp ?? 2, nf.sep ?? true);
-      return (n < 0 ? "-" : "") + (nf.cur ?? "£") + body;
+      return (n < 0 ? "-" : "") + (nf.cur ?? defaultCurrency()) + body;
     }
   }
+}
+
+/* ------------------------------- currency ------------------------------- */
+
+export const CURRENCIES: [string, string][] = [
+  ["£", "Pound"], ["$", "Dollar"], ["€", "Euro"], ["¥", "Yen / Yuan"], ["₹", "Rupee"],
+  ["CHF ", "Swiss franc"], ["kr ", "Krona / Krone"], ["R ", "Rand"],
+];
+
+const EURO = new Set(["AT", "BE", "CY", "DE", "EE", "ES", "FI", "FR", "GR", "HR", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "PT", "SI", "SK"]);
+const DOLLAR = new Set(["US", "CA", "AU", "NZ", "SG", "HK"]);
+
+/** Guess the currency from the Windows region (e.g. en-GB → £). */
+export function detectCurrency(): string {
+  const langs = navigator.languages?.length ? navigator.languages : [navigator.language];
+  for (const l of langs) {
+    const region = l.split("-")[1]?.toUpperCase();
+    if (!region) continue;
+    if (region === "GB") return "£";
+    if (DOLLAR.has(region)) return "$";
+    if (EURO.has(region)) return "€";
+    if (region === "JP" || region === "CN") return "¥";
+    if (region === "IN") return "₹";
+    if (region === "CH") return "CHF ";
+    if (region === "SE" || region === "NO" || region === "DK") return "kr ";
+    if (region === "ZA") return "R ";
+  }
+  return "$";
+}
+
+/** The currency the £/$ button uses: the user's preference, else the region's. */
+export function defaultCurrency(): string {
+  const pref = localStorage.getItem("bento.currency");
+  return pref && pref !== "auto" ? pref : detectCurrency();
 }
 
 /** How many decimals a value is currently showing (for the .0 / .00 buttons). */

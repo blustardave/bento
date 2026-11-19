@@ -13,7 +13,7 @@ import { MenuItem, closeMenus, modal, showMenu, toast } from "./ui";
 import { ToolButton, divider, grow, toolButton } from "./toolbar";
 import { ZOOMS } from "./grid";
 import { FormatBar } from "./formatbar";
-import { Style } from "./format";
+import { CURRENCIES, Style, detectCurrency } from "./format";
 import { appVersion, initUpdater } from "./updater";
 import { basename, cellName, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 
@@ -38,7 +38,15 @@ export class App {
     },
     apply: (patch, label) => this.applyFormat(patch, label),
     theme: () => (document.documentElement.dataset.theme === "dark" ? "dark" : "light"),
+    toggleMerge: () => this.toggleMerge(),
+    selectionMerged: () => {
+      const d = this.active;
+      if (!d || !d.merges.length) return false;
+      const s = selRect(d.sel);
+      return this.grid.visibleMerges().some((m) => m.r0 <= s.r1 && s.r0 <= m.r1 && m.c0 <= s.c1 && s.c0 <= m.c1);
+    },
   });
+  private zoomInput!: HTMLInputElement;
 
   constructor() {
     this.grid = new Grid({
@@ -499,7 +507,7 @@ export class App {
   /* -------------------------------- zoom -------------------------------- */
 
   private setZoom(z: number) {
-    z = Math.min(2, Math.max(0.5, Math.round(z * 100) / 100));
+    z = Math.min(4, Math.max(0.25, Math.round(z * 100) / 100));
     localStorage.setItem("bento.zoom", String(z));
     this.grid.setZoom(z);
     this.refreshToolbar();
@@ -517,42 +525,55 @@ export class App {
     const bar = $("toolbar");
     const t = (key: string, b: ToolButton) => { this.tools[key] = b; return b.el; };
     const withDoc = (fn: (d: Doc) => void) => () => { const d = this.active; if (d && d.loading === null) fn(d); };
-    const col = () => this.active!.sel.ac;
+    const f = this.formatBar.build();
+
+    // Zoom: pick a level or type your own (e.g. 135).
+    this.zoomInput = el("input", { class: "zoom-input", value: "100%", title: "Zoom (Ctrl+= / Ctrl+-)", spellcheck: "false" });
+    const zoomCaret = toolButton({ icon: "caret", title: "Zoom levels", onClick: () => openZoomMenu() });
+    zoomCaret.el.classList.add("caret-btn");
+    const zoomBox = el("div", { class: "combo" }, this.zoomInput, zoomCaret.el);
+    const openZoomMenu = () => {
+      const r = zoomBox.getBoundingClientRect();
+      zoomBox.classList.add("open");
+      showMenu(ZOOMS.map((z) => ({ label: `${Math.round(z * 100)}%`, checked: Math.abs(this.grid.zoom - z) < 0.001, action: () => this.setZoom(z) })),
+        r.left, r.bottom + 4, () => zoomBox.classList.remove("open"));
+    };
+    this.zoomInput.addEventListener("click", () => { this.zoomInput.select(); openZoomMenu(); });
+    this.zoomInput.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        closeMenus();
+        const v = parseFloat(this.zoomInput.value);
+        if (v > 0) this.setZoom(v / 100);
+        this.zoomInput.blur();
+        this.grid.focus();
+      } else if (e.key === "Escape") { closeMenus(); this.zoomInput.blur(); this.grid.focus(); }
+    });
+    this.zoomInput.addEventListener("input", () => closeMenus());
+    this.zoomInput.addEventListener("blur", () => this.refreshToolbar());
+
     bar.append(
       t("undo", toolButton({ icon: "undo", title: "Undo (Ctrl+Z)", onClick: withDoc((d) => this.grid.applyUndo(d.undo())) })),
       t("redo", toolButton({ icon: "redo", title: "Redo (Ctrl+Y)", onClick: withDoc((d) => this.grid.applyUndo(d.redo())) })),
+      zoomBox,
+      divider(), ...f.numbers,
+      divider(), ...f.font,
+      divider(), ...f.size,
+      divider(), ...f.text,
+      divider(), ...f.fill,
+      divider(), ...f.align,
       divider(),
-      t("zoom", toolButton({ text: "100%", caret: true, title: "Zoom (Ctrl+= / Ctrl+-)", onClick: (b) => {
-        const r = b.getBoundingClientRect();
-        b.classList.add("open");
-        showMenu(ZOOMS.map((z) => ({ label: `${Math.round(z * 100)}%`, checked: Math.abs(this.grid.zoom - z) < 0.001, action: () => this.setZoom(z) })),
-          r.left, r.bottom + 4, () => b.classList.remove("open"));
-      } })),
-      divider(),
-      ...this.formatBar.build(),
-      divider(),
-      t("sortAsc", toolButton({ icon: "sortAsc", title: "Sort column A → Z", onClick: withDoc((d) => { d.sortBy(col(), false); this.afterStructure(); }) })),
-      t("sortDesc", toolButton({ icon: "sortDesc", title: "Sort column Z → A", onClick: withDoc((d) => { d.sortBy(col(), true); this.afterStructure(); }) })),
+      t("link", toolButton({ icon: "link", title: "Insert link (coming soon)", onClick: () => {} })),
       t("filter", toolButton({ icon: "filter", title: "Filter column", onClick: (b) => withDoc((d) => {
         const r = b.getBoundingClientRect();
-        openFilter(d, col(), r.left, r.bottom + 4, () => this.afterStructure());
+        openFilter(d, d.sel.ac, r.left, r.bottom + 4, () => this.afterStructure());
       })() })),
-      t("freeze", toolButton({ icon: "freeze", title: "Freeze header row", onClick: withDoc(() => this.toggleFreeze()) })),
-      divider(),
-      t("insRow", toolButton({ icon: "insertRow", title: "Insert row above", onClick: withDoc(() => runItem(this.rowItems()[0])) })),
-      t("insCol", toolButton({ icon: "insertCol", title: "Insert column left", onClick: withDoc(() => runItem(this.colItems()[0])) })),
-      t("delRow", toolButton({ icon: "deleteRow", title: "Delete row", onClick: withDoc(() => runItem(this.rowItems()[2])) })),
-      t("delCol", toolButton({ icon: "deleteCol", title: "Delete column", onClick: withDoc(() => runItem(this.colItems()[2])) })),
-      t("fit", toolButton({ icon: "fitWidth", title: "Fit column width to content", onClick: withDoc((d) => {
-        const s = selRect(d.sel);
-        for (let c = s.c0; c <= s.c1; c++) this.grid.autoFit(c);
-      }) })),
-      divider(),
       t("sum", toolButton({ icon: "sum", caret: true, title: "Functions", onClick: (b) => {
         if (!this.active) return;
         const r = b.getBoundingClientRect();
         b.classList.add("open");
-        showMenu(["SUM", "AVERAGE", "COUNT", "MIN", "MAX"].map((f) => ({ label: f[0] + f.slice(1).toLowerCase(), key: f, action: () => this.autoSum(f) })),
+        showMenu(["SUM", "AVERAGE", "COUNT", "MIN", "MAX"].map((fn) => ({ label: fn[0] + fn.slice(1).toLowerCase(), key: fn, action: () => this.autoSum(fn) })),
           r.left, r.bottom + 4, () => b.classList.remove("open"));
       } })),
       grow(),
@@ -562,16 +583,42 @@ export class App {
     if (z) this.grid.setZoom(z);
   }
 
+  /** Merge the selection, or unmerge if it already contains merged cells. */
+  private toggleMerge() {
+    const d = this.active;
+    if (!d || d.loading !== null) return;
+    if (this.grid.editing) this.grid.commitEdit();
+    const s = selRect(d.sel);
+    const lo = d.dataRow(s.r0), hi = d.dataRow(s.r1);
+    const rect = { r0: lo, c0: s.c0, r1: hi, c1: s.c1 };
+    if (this.formatBar && this.grid.visibleMerges().some((m) => m.r0 <= s.r1 && s.r0 <= m.r1 && m.c0 <= s.c1 && s.c0 <= m.c1)) {
+      d.unmerge(rect);
+    } else {
+      if (s.r0 === s.r1 && s.c0 === s.c1) { toast("Select two or more cells to merge"); return; }
+      if (d.view) { toast("Clear filters before merging cells"); return; }
+      if (d.freezeHeader && s.r0 === 0 && s.r1 > 0) { toast("Can't merge across the frozen header row"); return; }
+      if ((s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1) > 100_000) { toast("That's too many cells to merge"); return; }
+      d.merge(rect);
+    }
+    this.grid.select({ ar: s.r0, ac: s.c0, fr: s.r1, fc: s.c1 }, false);
+    this.onChange();
+  }
+
+  /** Sort, unless merged cells make it impossible. */
+  private sort(d: Doc, col: number, desc: boolean) {
+    if (!d.sortBy(col, desc)) { toast("Can't sort while cells are merged across rows — unmerge them first"); return; }
+    this.afterStructure();
+  }
+
   private refreshToolbar() {
     const d = this.active;
     const ready = !!d && d.loading === null;
     for (const b of Object.values(this.tools)) b.set({ disabled: !ready });
-    this.tools.zoom.set({ disabled: false, text: `${Math.round(this.grid.zoom * 100)}%` });
+    if (document.activeElement !== this.zoomInput) this.zoomInput.value = `${Math.round(this.grid.zoom * 100)}%`;
     if (!ready || !d) { this.formatBar.refresh(false); return; }
     this.tools.undo.set({ disabled: !d.canUndo });
     this.tools.redo.set({ disabled: !d.canRedo });
     this.tools.filter.set({ on: d.filters.has(d.sel.ac) });
-    this.tools.freeze.set({ on: d.freezeHeader });
     this.formatBar.refresh(ready);
   }
 
@@ -643,6 +690,7 @@ export class App {
       { label: "Clear all filters", disabled: !d?.filters.size, action: () => { d!.clearFilters(); this.afterStructure(); } },
       { label: "Unhide all columns", disabled: !d?.hidden.size, action: () => { d!.hidden.clear(); this.onChange(); } },
       "sep",
+      { label: "Preferences…", key: "Ctrl+,", action: () => this.preferences() },
       { label: "Keyboard shortcuts", key: "F1", action: () => this.shortcuts() },
       { label: "About Bento", action: async () => modal("Bento", `Version ${await appVersion()}\nA minimal, fast CSV editor.\nUpdates install automatically.`, [{ label: "Close", value: true, primary: true }]) },
     ];
@@ -657,6 +705,31 @@ export class App {
     d.version++;
     this.grid.setDoc(d);
     this.afterStructure();
+  }
+
+  private preferences() {
+    closeMenus();
+    const sel = el("select", { class: "field" });
+    const detected = detectCurrency().trim();
+    sel.append(el("option", { value: "auto", text: `Automatic (${detected}, from your Windows region)` }));
+    for (const [sym, name] of CURRENCIES) sel.append(el("option", { value: sym, text: `${sym.trim()}  ${name}` }));
+    sel.value = localStorage.getItem("bento.currency") ?? "auto";
+    const done = el("button", { class: "btn primary", text: "Done" });
+    const box = el("div", { class: "modal prefs", role: "dialog" },
+      el("h3", { text: "Preferences" }),
+      el("label", { class: "pref" }, el("span", { text: "Default currency" }), sel),
+      el("p", { class: "hint", text: "Used by the currency button in the toolbar." }),
+      el("div", { class: "foot" }, done),
+    );
+    const scrim = el("div", { class: "scrim" }, box);
+    const close = () => { scrim.remove(); window.removeEventListener("keydown", onKey, true); this.grid.focus(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" || (e.key === "Enter" && document.activeElement !== sel)) { e.preventDefault(); e.stopPropagation(); close(); } };
+    sel.addEventListener("change", () => { localStorage.setItem("bento.currency", sel.value); this.refreshToolbar(); this.grid.invalidate(); });
+    done.addEventListener("click", close);
+    scrim.addEventListener("pointerdown", (e) => { if (e.target === scrim) close(); });
+    window.addEventListener("keydown", onKey, true);
+    document.body.append(scrim);
+    sel.focus();
   }
 
   private shortcuts() {
@@ -798,8 +871,8 @@ export class App {
     const s = selRect(d.sel);
     const hideRange = () => { for (let i = s.c0; i <= s.c1; i++) d.hidden.add(i); this.onChange(); };
     showMenu([
-      { label: "Sort A → Z", action: () => { d.sortBy(c, false); this.afterStructure(); } },
-      { label: "Sort Z → A", action: () => { d.sortBy(c, true); this.afterStructure(); } },
+      { label: "Sort A → Z", action: () => this.sort(d, c, false) },
+      { label: "Sort Z → A", action: () => this.sort(d, c, true) },
       "sep",
       { label: d.filters.has(c) ? "Edit filter…" : "Filter…", action: () => openFilter(d, c, x, y, () => this.afterStructure()) },
       ...(d.filters.has(c) ? [{ label: "Remove filter", action: () => { d.setFilter(c, null); this.afterStructure(); } } as MenuItem] : []),
@@ -920,6 +993,7 @@ export class App {
       else if (ctrl && e.key === "-") { e.preventDefault(); this.stepZoom(-1); }
       else if (ctrl && e.key === "0") { e.preventDefault(); this.setZoom(1); }
       else if (e.key === "F1") { e.preventDefault(); this.shortcuts(); }
+      else if (ctrl && e.key === ",") { e.preventDefault(); this.preferences(); }
       else if (e.key === "Escape" && this.find.isOpen && document.activeElement === this.grid.sink) { this.find.close(); }
       else if (d && document.activeElement === document.body && !ctrl && !e.altKey) {
         // Focus drifted (e.g. after clicking the title bar): give keys back to the grid.
@@ -941,10 +1015,6 @@ export class App {
       this.stepZoom(e.deltaY < 0 ? 1 : -1);
     }, { passive: false });
   }
-}
-
-function runItem(it: MenuItem) {
-  if (typeof it === "object" && "label" in it) it.action?.();
 }
 
 const LOGO = `<rect x="2" y="2" width="20" height="20" rx="5" fill="var(--accent)"/><rect x="5.2" y="5.2" width="6.2" height="13.6" rx="1.6" fill="var(--on-accent)"/><rect x="12.6" y="5.2" width="6.2" height="6.2" rx="1.6" fill="var(--on-accent)"/><rect x="12.6" y="12.6" width="6.2" height="6.2" rx="1.6" fill="var(--on-accent)" opacity=".55"/>`;

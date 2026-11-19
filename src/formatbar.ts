@@ -1,9 +1,9 @@
-/** Formatting controls for the toolbar: numbers, size, text style, colour, alignment. */
+/** Formatting controls for the toolbar, laid out like Google Sheets' (minus the clutter). */
 import {
-  DateFmt, FONT_SIZES, DEFAULT_SIZE, HUES, HAlign, NumFmt, Style, VAlign, Wrap,
-  colorLabel, resolveColor, shownDecimals,
+  DEFAULT_FONT, DEFAULT_SIZE, FONTS, FONT_SIZES, HAlign, HUES, Rotation, Style, VAlign, Wrap,
+  colorLabel, defaultCurrency, resolveColor, shownDecimals,
 } from "./format";
-import { IconName, ToolButton, divider, icon, toolButton } from "./toolbar";
+import { IconName, ToolButton, icon, toolButton } from "./toolbar";
 import { showMenu, showPopover } from "./ui";
 import { el } from "./util";
 
@@ -12,55 +12,83 @@ export interface FormatContext {
   active(): { style: Style; header: boolean; shown: string } | null;
   apply(patch: (s: Style) => Style, label: string): void;
   theme(): "light" | "dark";
+  /** Merge the selection, or unmerge it if it already holds merges. */
+  toggleMerge(): void;
+  selectionMerged(): boolean;
 }
 
 const ALIGN_ICONS: Record<HAlign, IconName> = { l: "alignL", c: "alignC", r: "alignR" };
 const VALIGN_ICONS: Record<VAlign, IconName> = { t: "vTop", m: "vMid", b: "vBot" };
 const WRAP_ICONS: Record<Wrap, IconName> = { overflow: "wrapOverflow", wrap: "wrapWrap", clip: "wrapClip" };
+type Rot = Rotation | "none";
+const ROT_ICONS: Record<Rot, IconName> = { none: "rotNone", stack: "rotStack", up: "rotUp" };
+
+export interface FormatGroups {
+  numbers: HTMLElement[];
+  font: HTMLElement[];
+  size: HTMLElement[];
+  text: HTMLElement[];
+  fill: HTMLElement[];
+  align: HTMLElement[];
+}
 
 export class FormatBar {
   private t: Record<string, ToolButton> = {};
   private size!: HTMLInputElement;
+  private fontLabel!: HTMLElement;
 
   constructor(private ctx: FormatContext) {}
 
-  build(): HTMLElement[] {
+  build(): FormatGroups {
     const c = this.ctx;
     const t = (k: string, b: ToolButton) => { this.t[k] = b; return b.el; };
-    const nf = (patch: (n: NumFmt | undefined) => NumFmt | undefined, label = "Number format") =>
-      c.apply((s) => ({ ...s, nf: patch(s.nf) }), label);
 
-    // Numbers
+    /* Numbers */
     const numbers = [
-      t("cur", toolButton({ glyph: "£", glyphClass: "sym", caret: true, title: "Currency", onClick: (b) => {
-        const r = b.getBoundingClientRect();
-        showMenu([
-          ...[["£", "Pounds"], ["$", "Dollars"], ["€", "Euros"]].map(([sym, name]) => ({
-            label: `${sym}  ${name}`, action: () => nf(() => ({ k: "cur", cur: sym, dp: 2, sep: true }), "Currency"),
-          })),
-        ], r.left, r.bottom + 4);
-      } })),
+      t("cur", toolButton({ glyph: defaultCurrency().trim(), glyphClass: "sym", title: "Format as currency", onClick: () =>
+        c.apply((s) => ({ ...s, nf: s.nf?.k === "cur" ? undefined : { k: "cur", cur: defaultCurrency(), dp: 2, sep: true } }), "Currency") })),
       t("pct", toolButton({ glyph: "%", glyphClass: "sym", title: "Format as percent", onClick: () =>
-        nf((n) => (n?.k === "pct" ? undefined : { k: "pct", dp: 2 }), "Percent") })),
-      t("decDown", toolButton({ glyph: ".0", glyphClass: "dec", icon: "arrowL", title: "Fewer decimal places", onClick: () => this.stepDecimals(-1) })),
-      t("decUp", toolButton({ glyph: ".00", glyphClass: "dec", icon: "arrowR", title: "More decimal places", onClick: () => this.stepDecimals(1) })),
-      t("numFmt", toolButton({ glyph: "123", glyphClass: "sym small", caret: true, title: "More formats", onClick: (b) => this.formatsMenu(b) })),
+        c.apply((s) => ({ ...s, nf: s.nf?.k === "pct" ? undefined : { k: "pct", dp: 2 } }), "Percent") })),
+      t("decDown", toolButton({ glyph: ".0", glyphClass: "dec", icon: "arrowL", title: "Decrease decimal places", onClick: () => this.stepDecimals(-1) })),
+      t("decUp", toolButton({ glyph: ".00", glyphClass: "dec", icon: "arrowR", title: "Increase decimal places", onClick: () => this.stepDecimals(1) })),
+      t("numFmt", toolButton({ glyph: "123", glyphClass: "sym small", caret: true, title: "More formats", onClick: (b) => {
+        const r = b.getBoundingClientRect();
+        const isText = c.active()?.style.nf?.k === "text";
+        b.classList.add("open");
+        showMenu([
+          { label: "Plain text", checked: isText, action: () => c.apply((s) => ({ ...s, nf: isText ? undefined : { k: "text" } }), "Plain text") },
+        ], r.left, r.bottom + 4, () => b.classList.remove("open"));
+      } })),
     ];
-    // icon after glyph for decimal buttons (".0 ←")
+    // Decimal buttons read ".0 ←" / ".00 →": glyph first, then the arrow.
     for (const k of ["decDown", "decUp"]) { const b = this.t[k].el; b.append(b.firstElementChild!); }
 
-    // Font size stepper
+    /* Font */
+    const fontBtn = toolButton({ text: "Default", caret: true, title: "Font", onClick: (b) => {
+      const r = b.getBoundingClientRect();
+      const cur = c.active()?.style.font ?? DEFAULT_FONT;
+      b.classList.add("open");
+      showMenu(FONTS.map((f) => ({
+        label: f === DEFAULT_FONT ? "Default (Segoe UI)" : f, font: f, checked: f === cur,
+        action: () => c.apply((s) => ({ ...s, font: f === DEFAULT_FONT ? undefined : f }), "Font"),
+      })), r.left, r.bottom + 4, () => b.classList.remove("open"));
+    } });
+    fontBtn.el.classList.add("font-btn");
+    this.fontLabel = fontBtn.el.querySelector(".txt")!;
+    this.t.font = fontBtn;
+
+    /* Font size */
     this.size = el("input", { class: "size-input", value: String(DEFAULT_SIZE), title: "Font size", spellcheck: "false" });
     const applySize = (v: number) => {
       const n = Math.max(4, Math.min(96, Math.round(v)));
       c.apply((s) => ({ ...s, size: n === DEFAULT_SIZE ? undefined : n }), "Font size");
     };
     const current = () => c.active()?.style.size ?? DEFAULT_SIZE;
-    const minus = toolButton({ icon: "minus", title: "Smaller text", onClick: () => {
+    const minus = toolButton({ icon: "minus", title: "Decrease font size", onClick: () => {
       const cur = current();
       applySize([...FONT_SIZES].reverse().find((x) => x < cur) ?? Math.max(4, cur - 1));
     } });
-    const plus = toolButton({ icon: "plus", title: "Bigger text", onClick: () => {
+    const plus = toolButton({ icon: "plus", title: "Increase font size", onClick: () => {
       const cur = current();
       applySize(FONT_SIZES.find((x) => x > cur) ?? cur + 2);
     } });
@@ -68,7 +96,7 @@ export class FormatBar {
     this.t.sizePlus = plus;
     this.size.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); const v = Number(this.size.value); if (v) applySize(v); this.size.blur(); }
-      else if (e.key === "Escape") { this.size.blur(); }
+      else if (e.key === "Escape") this.size.blur();
       e.stopPropagation();
     });
     this.size.addEventListener("click", () => {
@@ -77,48 +105,52 @@ export class FormatBar {
       showMenu(FONT_SIZES.map((x) => ({ label: String(x), checked: x === cur, action: () => applySize(x) })), r.left, r.bottom + 4);
     });
     this.size.addEventListener("blur", () => this.refresh());
-    const sizeGroup = el("div", { class: "stepper" }, minus.el, this.size, plus.el);
+    const size = [el("div", { class: "stepper" }, minus.el, this.size, plus.el)];
 
-    // Text style
-    const toggle = (key: "b" | "i" | "u" | "s", label: string) => () => {
+    /* Text style */
+    const toggle = (key: "b" | "i" | "s", label: string) => () => {
       const a = c.active();
       const on = a ? !!(a.style[key] ?? (key === "b" && a.header)) : false;
       c.apply((s) => ({ ...s, [key]: on ? (key === "b" && a?.header ? false : undefined) : true }), label);
     };
-    const textStyle = [
+    const text = [
       t("b", toolButton({ glyph: "B", glyphClass: "bold", title: "Bold (Ctrl+B)", onClick: toggle("b", "Bold") })),
       t("i", toolButton({ glyph: "I", glyphClass: "italic", title: "Italic (Ctrl+I)", onClick: toggle("i", "Italic") })),
-      t("u", toolButton({ glyph: "U", glyphClass: "underline", title: "Underline (Ctrl+U)", onClick: toggle("u", "Underline") })),
       t("s", toolButton({ glyph: "S", glyphClass: "strike", title: "Strikethrough (Alt+Shift+5)", onClick: toggle("s", "Strikethrough") })),
-      t("color", toolButton({ icon: "textColor", caret: true, title: "Text colour", onClick: (b) => this.palette(b, "color") })),
-      t("fill", toolButton({ icon: "fill", caret: true, title: "Fill colour", onClick: (b) => this.palette(b, "fill") })),
+      t("color", toolButton({ icon: "textColor", title: "Text colour", onClick: (b) => this.palette(b, "color") })),
     ];
 
-    // Alignment
-    const picker = <T extends string>(key: string, title: string, icons: Record<T, IconName>, labels: Record<T, string>, prop: "ha" | "va" | "wrap") =>
+    /* Fill + merge */
+    const fill = [
+      t("fill", toolButton({ icon: "fill", title: "Fill colour", onClick: (b) => this.palette(b, "fill") })),
+      t("merge", toolButton({ icon: "merge", title: "Merge cells", onClick: () => c.toggleMerge() })),
+    ];
+
+    /* Alignment, wrapping, rotation — each a horizontal row of icons */
+    const picker = <T extends string>(key: string, title: string, icons: Record<T, IconName>, labels: Record<T, string>, apply: (s: Style, v: T) => Style, current: (s: Style) => T) =>
       t(key, toolButton({ icon: Object.values<IconName>(icons)[0], caret: true, title, onClick: (b) => {
-        const cur = c.active()?.style[prop];
+        const cur = current(c.active()?.style ?? {});
         const row = el("div", { class: "icon-row" });
         let close = () => {};
         for (const [v, ic] of Object.entries(icons) as [T, IconName][]) {
           const btn = el("button", { class: "tb" + (cur === v ? " on" : ""), title: labels[v] }, icon(ic));
-          btn.addEventListener("click", () => { c.apply((s) => ({ ...s, [prop]: v }), title); close(); });
+          btn.addEventListener("click", () => { c.apply((s) => apply(s, v), title); close(); });
           row.append(btn);
         }
         close = showPopover(b, row);
       } }));
     const align = [
-      picker<HAlign>("ha", "Horizontal align", ALIGN_ICONS, { l: "Left (Ctrl+Shift+L)", c: "Centre (Ctrl+Shift+E)", r: "Right (Ctrl+Shift+R)" }, "ha"),
-      picker<VAlign>("va", "Vertical align", VALIGN_ICONS, { t: "Top", m: "Middle", b: "Bottom" }, "va"),
-      picker<Wrap>("wrap", "Text wrapping", WRAP_ICONS, { overflow: "Overflow", wrap: "Wrap", clip: "Clip" }, "wrap"),
+      picker<HAlign>("ha", "Horizontal align", ALIGN_ICONS, { l: "Left (Ctrl+Shift+L)", c: "Centre (Ctrl+Shift+E)", r: "Right (Ctrl+Shift+R)" },
+        (s, v) => ({ ...s, ha: v }), (s) => s.ha ?? "l"),
+      picker<VAlign>("va", "Vertical align", VALIGN_ICONS, { t: "Top", m: "Middle", b: "Bottom" },
+        (s, v) => ({ ...s, va: v === "b" ? undefined : v }), (s) => s.va ?? "b"),
+      picker<Wrap>("wrap", "Text wrapping", WRAP_ICONS, { overflow: "Overflow", wrap: "Wrap", clip: "Clip" },
+        (s, v) => ({ ...s, wrap: v === "overflow" ? undefined : v }), (s) => s.wrap ?? "overflow"),
+      picker<Rot>("rot", "Text rotation", ROT_ICONS, { none: "None", stack: "Stack vertically", up: "Rotate up" },
+        (s, v) => ({ ...s, rot: v === "none" ? undefined : v }), (s) => s.rot ?? "none"),
     ];
 
-    return [
-      ...numbers, divider(),
-      sizeGroup, divider(),
-      ...textStyle, divider(),
-      ...align,
-    ];
+    return { numbers, font: [fontBtn.el], size, text, fill, align };
   }
 
   private stepDecimals(dir: 1 | -1) {
@@ -126,36 +158,10 @@ export class FormatBar {
     if (!a) return;
     const startDp = a.style.nf?.dp ?? shownDecimals(a.shown);
     this.ctx.apply((s) => {
-      const n = s.nf && s.nf.k !== "date" ? s.nf : { k: "num" as const };
+      const n = s.nf && s.nf.k !== "date" && s.nf.k !== "text" ? s.nf : { k: "num" as const };
       const dp = Math.max(0, Math.min(10, (n.dp ?? startDp) + dir));
       return { ...s, nf: { ...n, dp } };
     }, dir > 0 ? "More decimals" : "Fewer decimals");
-  }
-
-  private formatsMenu(b: HTMLElement) {
-    const a = this.ctx.active();
-    const cur = a?.style.nf;
-    const set = (n: NumFmt | undefined, label: string) => () => this.ctx.apply((s) => ({ ...s, nf: n }), label);
-    const date = (f: DateFmt, sample: string) => ({ label: sample, checked: cur?.k === "date" && (cur.date ?? "iso") === f, action: set({ k: "date", date: f }, "Date format") });
-    const r = b.getBoundingClientRect();
-    showMenu([
-      { label: "Automatic", checked: !cur, action: set(undefined, "Automatic format") },
-      { label: "Number", key: "1,000.12", checked: cur?.k === "num", action: set({ k: "num", dp: 2, sep: true }, "Number format") },
-      { label: "Percent", key: "10.12%", checked: cur?.k === "pct", action: set({ k: "pct", dp: 2 }, "Percent") },
-      { label: "Currency", key: "£1,000.12", checked: cur?.k === "cur", action: set({ k: "cur", cur: cur?.cur ?? "£", dp: 2, sep: true }, "Currency") },
-      "sep",
-      { heading: "Dates" },
-      date("iso", "2026-01-31"),
-      date("dmy", "31/01/2026"),
-      date("mdy", "01/31/2026"),
-      date("long", "31 Jan 2026"),
-      "sep",
-      { label: "Thousands separator", checked: !!cur?.sep && cur.k !== "date", disabled: cur?.k === "date", action: () =>
-        this.ctx.apply((s) => {
-          const n = s.nf ?? { k: "num" as const };
-          return { ...s, nf: { ...n, sep: !n.sep } };
-        }, "Thousands separator") },
-    ], r.left, r.bottom + 4);
   }
 
   private palette(anchor: HTMLElement, prop: "color" | "fill") {
@@ -174,15 +180,12 @@ export class FormatBar {
     const reset = el("button", { class: "reset" }, icon("clearFormat", 14), prop === "color" ? "Automatic" : "No fill");
     reset.addEventListener("click", () => pick(undefined));
     box.append(reset);
-    const rows: [string, (h: string) => string][] = prop === "color"
-      ? [["", (h) => `@${h}`]]
-      : [["", (h) => `@${h}-1`], ["", (h) => `@${h}-2`]];
-    for (const [, tok] of rows) {
+    const rows: ((h: string) => string)[] = prop === "color" ? [(h) => `@${h}`] : [(h) => `@${h}-1`, (h) => `@${h}-2`];
+    for (const tok of rows) {
       const row = el("div", { class: "swatches" });
       for (const h of HUES) row.append(swatch(tok(h), colorLabel(h)));
       box.append(row);
     }
-    // Custom colours (remembered).
     const key = `bento.custom.${prop}`;
     let recent: string[] = [];
     try { recent = JSON.parse(localStorage.getItem(key) ?? "[]"); } catch { /* ignore */ }
@@ -212,17 +215,20 @@ export class FormatBar {
     const theme = this.ctx.theme();
     this.t.b.set({ on: !!(s.b ?? a.header) });
     this.t.i.set({ on: !!s.i });
-    this.t.u.set({ on: !!s.u });
     this.t.s.set({ on: !!s.s });
     this.t.pct.set({ on: s.nf?.k === "pct" });
     this.t.cur.set({ on: s.nf?.k === "cur" });
     const g = this.t.cur.el.querySelector(".glyph");
-    if (g) g.textContent = s.nf?.k === "cur" ? s.nf.cur ?? "£" : "£";
-    this.t.numFmt.set({ on: s.nf?.k === "num" || s.nf?.k === "date" });
+    if (g) g.textContent = (s.nf?.k === "cur" ? s.nf.cur ?? defaultCurrency() : defaultCurrency()).trim();
+    this.t.numFmt.set({ on: s.nf?.k === "text" });
+    this.t.merge.set({ on: this.ctx.selectionMerged() });
+    this.fontLabel.textContent = !s.font || s.font === DEFAULT_FONT ? "Default" : s.font;
+    this.fontLabel.style.fontFamily = s.font ? `"${s.font}", var(--font-ui)` : "";
     if (document.activeElement !== this.size) this.size.value = String(s.size ?? DEFAULT_SIZE);
     this.t.ha.set({ icon: ALIGN_ICONS[s.ha ?? "l"] });
-    this.t.va.set({ icon: VALIGN_ICONS[s.va ?? "m"] });
+    this.t.va.set({ icon: VALIGN_ICONS[s.va ?? "b"] });
     this.t.wrap.set({ icon: WRAP_ICONS[s.wrap ?? "overflow"] });
+    this.t.rot.set({ icon: ROT_ICONS[s.rot ?? "none"] });
     this.t.color.set({ swatch: resolveColor(s.color, theme) ?? getComputedStyle(document.documentElement).getPropertyValue("--text").trim() });
     this.t.fill.set({ swatch: resolveColor(s.fill, theme) });
   }

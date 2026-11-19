@@ -1,7 +1,7 @@
 import { fromTSV, toTSV } from "./csv";
 import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, selRect } from "./doc";
 import { offsetFormula } from "./formula";
-import { DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
+import { DEFAULT_FONT, DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
 import { clamp, colName, parseNum } from "./util";
 
 const BASE_ROW_H = 26;
@@ -153,13 +153,73 @@ export class Grid {
     if (!d) return;
     const maxR = d.displayRows() - 1;
     const maxC = d.displayCols() - 1;
-    d.sel = {
+    let ns: Sel = {
       ar: clamp(sel.ar, 0, maxR), ac: clamp(sel.ac, 0, maxC),
       fr: clamp(sel.fr, 0, maxR), fc: clamp(sel.fc, 0, maxC),
     };
+    ns = this.snapToMerges(ns);
+    d.sel = ns;
     if (scroll) this.scrollIntoView(d.sel.fr, d.sel.fc);
     this.hooks.onSelection();
     this.invalidate();
+  }
+
+  /* ------------------------------ merges ------------------------------ */
+
+  private mergeCache: { key: string; list: Rect[] } = { key: "", list: [] };
+
+  /** Merged ranges in display coordinates (skipping any split up by a filter). */
+  visibleMerges(): Rect[] {
+    const d = this.doc;
+    if (!d || !d.merges.length) return [];
+    const key = `${d.id}:${d.version}:${d.merges.length}`;
+    if (this.mergeCache.key === key) return this.mergeCache.list;
+    const list: Rect[] = [];
+    for (const m of d.merges) {
+      const r0 = d.displayRow(m.r0), r1 = d.displayRow(m.r1);
+      if (r0 < 0 || r1 < 0 || r1 - r0 !== m.r1 - m.r0) continue;
+      if (d.freezeHeader && r0 === 0 && r1 > 0) continue; // can't span the frozen row
+      list.push({ r0, c0: m.c0, r1, c1: m.c1 });
+    }
+    this.mergeCache = { key, list };
+    return list;
+  }
+
+  /** The merged range (display coords) containing a cell, if any. */
+  mergeAt(r: number, c: number): Rect | null {
+    for (const m of this.visibleMerges()) if (r >= m.r0 && r <= m.r1 && c >= m.c0 && c <= m.c1) return m;
+    return null;
+  }
+
+  /** Active cell goes to a merge's top-left; the range grows to cover merges it touches. */
+  private snapToMerges(s: Sel): Sel {
+    const ms = this.visibleMerges();
+    if (!ms.length) return s;
+    const am = this.mergeAt(s.ar, s.ac);
+    if (am) { s = { ...s, ar: am.r0, ac: am.c0 }; if (s.fr >= am.r0 && s.fr <= am.r1 && s.fc >= am.c0 && s.fc <= am.c1) { s.fr = am.r1; s.fc = am.c1; } }
+    let rect = selRect(s);
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const m of ms) {
+        if (m.r0 <= rect.r1 && rect.r0 <= m.r1 && m.c0 <= rect.c1 && rect.c0 <= m.c1) {
+          const n = { r0: Math.min(rect.r0, m.r0), c0: Math.min(rect.c0, m.c0), r1: Math.max(rect.r1, m.r1), c1: Math.max(rect.c1, m.c1) };
+          if (n.r0 !== rect.r0 || n.c0 !== rect.c0 || n.r1 !== rect.r1 || n.c1 !== rect.c1) { rect = n; changed = true; }
+        }
+      }
+    }
+    return {
+      ar: s.ar, ac: s.ac,
+      fr: s.fr >= s.ar ? rect.r1 : rect.r0,
+      fc: s.fc >= s.ac ? rect.c1 : rect.c0,
+    };
+  }
+
+  /** Screen rectangle of a cell, covering its whole merge. */
+  private cellBox(r: number, c: number): { x: number; y: number; w: number; h: number } {
+    const m = this.mergeAt(r, c);
+    const r0 = m ? m.r0 : r, c0 = m ? m.c0 : c, r1 = m ? m.r1 : r, c1 = m ? m.c1 : c;
+    const x = this.colLeft(c0), y = this.rowTop(r0);
+    return { x, y, w: this.colLeft(c1) + this.cw(c1) - x, h: this.rowTop(r1) + this.rowH(r1) - y };
   }
 
   selectAll() {
@@ -377,11 +437,13 @@ export class Grid {
   private cellFont(s: Style, header: boolean, zoom = this.zoom): string {
     const px = ptToPx(s.size ?? DEFAULT_SIZE) * zoom;
     const bold = s.b ?? header;
-    return `${s.i ? "italic " : ""}${bold ? "600 " : ""}${px}px ${FONT_STACK}`;
+    const family = s.font && s.font !== DEFAULT_FONT ? `"${s.font}", ${FONT_STACK}` : FONT_STACK;
+    return `${s.i ? "italic " : ""}${bold ? "600 " : ""}${px}px ${family}`;
   }
 
   /** What a cell shows: formula result, then number/date formatting. */
   private cellText(r: number, c: number, raw: string, s: Style, d: Doc = this.doc!): { text: string; err: boolean; numeric: boolean } {
+    if (s.nf?.k === "text") return { text: raw, err: false, numeric: false };
     const shown = raw.charCodeAt(0) === 61 ? d.display(r, c) : raw;
     const err = raw.charCodeAt(0) === 61 && shown.charCodeAt(0) === 35 && /^#[A-Z0-9/]+[!?A]$/.test(shown);
     const numeric = !err && (!Number.isNaN(parseNum(shown)) || (s.nf?.k === "date" && applyNumFmt(shown, s.nf) !== shown));
@@ -426,10 +488,17 @@ export class Grid {
     for (let c = 0; c < st.length; c++) {
       if (!st[c]) continue;
       const s = d.styles[st[c]];
-      if (!s.size && s.wrap !== "wrap") continue;
+      if (!s.size && s.wrap !== "wrap" && !s.rot) continue;
       const lh = Math.round(ptToPx(s.size ?? DEFAULT_SIZE) * 1.35);
       let lines = 1;
       const raw = d.raw(r, c);
+      if (s.rot && raw) {
+        ctx.font = this.cellFont(s, r === 0 && d.freezeHeader, 1);
+        const t = this.cellText(r, c, raw, s, d).text;
+        const h = s.rot === "stack" ? [...t].length * lh + 8 : Math.ceil(ctx.measureText(t).width) + BASE_PAD * 2;
+        max = Math.max(max, h);
+        continue;
+      }
       if (s.wrap === "wrap" && raw) {
         ctx.font = this.cellFont(s, r === 0 && d.freezeHeader, 1);
         lines = this.wrapLines(this.cellText(r, c, raw, s, d).text, d.width(c) - BASE_PAD * 2).length;
@@ -499,27 +568,47 @@ export class Grid {
     const right = Math.min(this.w, this.colLeft(c1) + this.cw(c1));
     const pad = this.pad;
 
-    // 1. Backgrounds: cell fills, find matches, selection.
+    // Merges touching this band of rows. Covered cells (not the top-left) are skipped.
+    const merges = this.visibleMerges().filter((m) => m.r1 >= r0 && m.r0 <= r1 && m.c1 >= c0 && m.c0 <= c1);
+    const covered = new Set<number>();
+    for (const m of merges) for (let r = Math.max(m.r0, r0); r <= Math.min(m.r1, r1); r++)
+      for (let c = Math.max(m.c0, c0); c <= Math.min(m.c1, c1); c++) if (r !== m.r0 || c !== m.c0) covered.add(r * 65536 + c);
+    const mergeOf = (r: number, c: number) => merges.find((m) => m.r0 === r && m.c0 === c) ?? null;
+    const boxOf = (r: number, c: number, m: Rect | null) => {
+      if (!m) return { x: this.colLeft(c), y: this.rowTop(r), w: this.cw(c), h: this.rowH(r) };
+      const x = this.colLeft(m.c0), y = this.rowTop(m.r0);
+      return { x, y, w: this.colLeft(m.c1) + this.cw(m.c1) - x, h: this.rowTop(m.r1) + this.rowH(m.r1) - y };
+    };
+    // Merges whose top-left is scrolled off still need drawing.
+    const anchors: [number, number][] = [];
+    for (const m of merges) if (m.r0 < r0 || m.c0 < c0) anchors.push([m.r0, m.c0]);
+
+    // 1. Backgrounds: fills, find matches, selection.
+    const fillCell = (r: number, c: number) => {
+      const dr = d.dataRow(r);
+      const id = d.styleId(dr, c);
+      const fill = id ? resolveColor(d.styles[id].fill, this.theme) : null;
+      if (!fill) return;
+      const b = boxOf(r, c, mergeOf(r, c));
+      ctx.fillStyle = fill;
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+    };
     for (let r = r0; r <= r1; r++) {
       const dr = d.dataRow(r);
       if (dr >= d.rows.length) break;
       const st = d.rowStyleArray(dr);
       if (!st) continue;
-      const y = this.rowTop(r), rh = this.rowH(r);
-      for (let c = c0; c <= Math.min(c1, st.length - 1); c++) {
-        const fill = st[c] ? resolveColor(d.styles[st[c]].fill, this.theme) : null;
-        if (fill) { ctx.fillStyle = fill; ctx.fillRect(this.colLeft(c), y, this.cw(c), rh); }
-      }
+      for (let c = c0; c <= Math.min(c1, st.length - 1); c++) if (st[c] && !covered.has(r * 65536 + c)) fillCell(r, c);
     }
+    for (const [r, c] of anchors) fillCell(r, c);
     if (this.matcher) {
       ctx.fillStyle = k.match;
       for (let r = r0; r <= r1; r++) {
         const dr = d.dataRow(r);
         if (dr >= d.rows.length) break;
-        const y = this.rowTop(r), rh = this.rowH(r);
         for (let c = c0; c <= c1; c++) {
-          const cw = this.cw(c);
-          if (cw && this.matcher(d.display(dr, c))) ctx.fillRect(this.colLeft(c), y, cw, rh);
+          if (covered.has(r * 65536 + c) || !this.cw(c)) continue;
+          if (this.matcher(d.display(dr, c))) { const b = boxOf(r, c, mergeOf(r, c)); ctx.fillRect(b.x, b.y, b.w, b.h); }
         }
       }
     }
@@ -528,97 +617,126 @@ export class Grid {
     const selY1 = this.rowTop(Math.min(sel.r1, r1)) + this.rowH(Math.min(sel.r1, r1)) + (sel.r1 > r1 ? 3 : 0);
     const selX0 = this.colLeft(sel.c0);
     const selX1 = this.colLeft(sel.c1) + this.cw(sel.c1);
-    if (selVisible && (sel.r0 !== sel.r1 || sel.c0 !== sel.c1)) {
+    const activeM = this.mergeAt(d.sel.ar, d.sel.ac);
+    const single = activeM ? sel.r0 === activeM.r0 && sel.r1 === activeM.r1 && sel.c0 === activeM.c0 && sel.c1 === activeM.c1 : sel.r0 === sel.r1 && sel.c0 === sel.c1;
+    if (selVisible && !single) {
       ctx.fillStyle = k.accentSoft;
       ctx.fillRect(selX0, selY0, selX1 - selX0, selY1 - selY0);
     }
 
-    // 2. Text. Overflowing text hides the grid line it crosses.
-    const skip = new Set<number>(); // r * 65536 + c: no vertical line after column c
+    // 2. Text. Overflowing text hides the grid lines it crosses.
+    const skipV = new Set<number>(); // no vertical line after (r, c)
     ctx.textBaseline = "middle";
+    const drawText = (r: number, c: number) => {
+      const dr = d.dataRow(r);
+      const row = d.rows[dr];
+      if (!row) return;
+      const raw = row[c];
+      if (!raw) return;
+      const m = mergeOf(r, c);
+      const box = boxOf(r, c, m);
+      if (box.w < 6) return;
+      const st = d.rowStyleArray(dr);
+      const s = st && st[c] ? d.styles[st[c]] : NO_STYLE;
+      const { text: full, err, numeric } = this.cellText(dr, c, raw, s);
+      const ha = s.ha ?? (numeric && !frozen ? "r" : "l");
+      const va = s.va ?? "b";
+      const wrap = s.wrap ?? "overflow";
+      const px = ptToPx(s.size ?? DEFAULT_SIZE) * this.zoom;
+      const lh = Math.round(px * 1.35);
+      ctx.font = this.cellFont(s, frozen);
+      const { x, y, w: cw, h: rh } = box;
+      const color = err ? k.error : resolveColor(s.color, this.theme) ?? k.text;
+
+      if (s.rot === "up") {
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x, y, cw - 1, rh - 1); ctx.clip();
+        ctx.fillStyle = color;
+        const tx = ha === "r" ? x + cw - pad - lh / 2 : ha === "c" ? x + cw / 2 : x + pad + lh / 2;
+        const ty = va === "t" ? y + pad : va === "m" ? y + rh / 2 : y + rh - pad;
+        ctx.translate(tx, ty);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = va === "t" ? "right" : va === "m" ? "center" : "left";
+        const line = full.split("\n")[0];
+        ctx.fillText(line, 0, 0.5);
+        this.decorate(s, line, 0, 0.5, px, ctx.textAlign as CanvasTextAlign);
+        ctx.restore();
+        return;
+      }
+
+      let lines: string[];
+      if (s.rot === "stack") lines = [...full.replace(/\n/g, " ")];
+      else if (wrap === "wrap") lines = this.wrapLines(full, cw - pad * 2);
+      else { const nl = full.indexOf("\n"); lines = [nl >= 0 ? full.slice(0, nl) + " ↵" : full]; }
+
+      // How far the text may draw: into empty neighbours when overflowing.
+      let clipW = cw - 1;
+      if (!m && !s.rot && wrap === "overflow" && ha === "l" && !numeric) {
+        const need = ctx.measureText(lines[0]).width + pad * 2;
+        let cc = c;
+        while (clipW < need && cc + 1 < this.ncols && this.colLeft(cc + 1) < this.w) {
+          const next = row[cc + 1];
+          if ((next !== undefined && next !== "") || covered.has(r * 65536 + cc + 1) || this.mergeAt(r, cc + 1)) break;
+          skipV.add(r * 65536 + cc);
+          cc++;
+          clipW += this.cw(cc);
+        }
+      }
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, y, clipW, rh - 1);
+      ctx.clip();
+      ctx.fillStyle = color;
+      const align: CanvasTextAlign = s.rot === "stack" ? "center" : ha === "r" ? "right" : ha === "c" ? "center" : "left";
+      ctx.textAlign = align;
+      const tx = s.rot === "stack"
+        ? (ha === "r" ? x + cw - pad - px / 2 : ha === "l" && s.ha ? x + pad + px / 2 : x + cw / 2)
+        : ha === "r" ? x + cw - pad : ha === "c" ? x + cw / 2 : x + pad;
+      const block = lines.length * lh;
+      let ty = va === "t" ? y + 4 * this.zoom + lh / 2
+        : va === "m" ? y + (rh - block) / 2 + lh / 2
+        : y + rh - 4 * this.zoom - block + lh / 2;
+      ty += 0.5;
+      for (const line of lines) {
+        ctx.fillText(line, tx, ty);
+        if (!s.rot) this.decorate(s, line, tx, ty, px, align);
+        ty += lh;
+      }
+      ctx.restore();
+    };
     for (let r = r0; r <= r1; r++) {
       const dr = d.dataRow(r);
       if (dr >= d.rows.length) break;
-      const row = d.rows[dr];
-      const st = d.rowStyleArray(dr);
-      const y = this.rowTop(r), rh = this.rowH(r);
-      for (let c = c0; c <= Math.min(c1, row.length - 1); c++) {
-        const raw = row[c];
-        if (!raw) continue;
-        const cw = this.cw(c);
-        if (cw < 6) continue;
-        const s = st && st[c] ? d.styles[st[c]] : NO_STYLE;
-        const { text: full, err, numeric } = this.cellText(dr, c, raw, s);
-        const ha = s.ha ?? (numeric && !frozen ? "r" : "l");
-        const va = s.va ?? "m";
-        const wrap = s.wrap ?? "overflow";
-        const px = ptToPx(s.size ?? DEFAULT_SIZE) * this.zoom;
-        const lh = Math.round(px * 1.35);
-        ctx.font = this.cellFont(s, frozen);
-        const x = this.colLeft(c);
-        let lines: string[];
-        if (wrap === "wrap") lines = this.wrapLines(full, cw - pad * 2);
-        else { const nl = full.indexOf("\n"); lines = [nl >= 0 ? full.slice(0, nl) + " ↵" : full]; }
-
-        // Work out how far the text may draw.
-        let clipW = cw - 1;
-        if (wrap === "overflow" && ha === "l" && !numeric) {
-          const need = ctx.measureText(lines[0]).width + pad * 2;
-          let cc = c;
-          while (clipW < need && cc + 1 < this.ncols && this.colLeft(cc + 1) < this.w) {
-            const next = row[cc + 1];
-            if (next !== undefined && next !== "") break;
-            skip.add(r * 65536 + cc);
-            cc++;
-            clipW += this.cw(cc);
-          }
-        }
-
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x, y, clipW, rh - 1);
-        ctx.clip();
-        ctx.fillStyle = err ? k.error : resolveColor(s.color, this.theme) ?? k.text;
-        ctx.textAlign = ha === "r" ? "right" : ha === "c" ? "center" : "left";
-        const tx = ha === "r" ? x + cw - pad : ha === "c" ? x + cw / 2 : x + pad;
-        const block = lines.length * lh;
-        let ty = va === "t" ? y + 4 * this.zoom + lh / 2
-          : va === "b" ? y + rh - 4 * this.zoom - block + lh / 2
-          : y + (rh - block) / 2 + lh / 2;
-        ty += 0.5;
-        for (const line of lines) {
-          ctx.fillText(line, tx, ty);
-          if (s.u || s.s) {
-            const tw = ctx.measureText(line).width;
-            const lx = ha === "r" ? tx - tw : ha === "c" ? tx - tw / 2 : tx;
-            const th = Math.max(1, Math.round(px / 13));
-            if (s.u) ctx.fillRect(lx, Math.round(ty + px * 0.45), tw, th);
-            if (s.s) ctx.fillRect(lx, Math.round(ty), tw, th);
-          }
-          ty += lh;
-        }
-        ctx.restore();
-      }
+      const len = d.rows[dr].length;
+      for (let c = c0; c <= Math.min(c1, len - 1); c++) if (!covered.has(r * 65536 + c)) drawText(r, c);
     }
+    for (const [r, c] of anchors) drawText(r, c);
 
-    // 3. Grid lines.
+    // 3. Grid lines (none inside merged cells).
     ctx.fillStyle = k.line;
+    const inMergeH = (r: number, c: number) => merges.some((m) => r >= m.r0 && r < m.r1 && c >= m.c0 && c <= m.c1);
+    const inMergeV = (r: number, c: number) => merges.some((m) => r >= m.r0 && r <= m.r1 && c >= m.c0 && c < m.c1);
     for (let r = r0; r <= r1; r++) {
       const y = this.rowTop(r) + this.rowH(r) - 1;
-      ctx.fillRect(rhw, y, right - rhw, 1);
+      if (!merges.length) { ctx.fillRect(rhw, y, right - rhw, 1); continue; }
+      for (let c = c0; c <= c1; c++) {
+        if (inMergeH(r, c)) continue;
+        ctx.fillRect(this.colLeft(c), y, this.cw(c), 1);
+      }
     }
     for (let c = c0; c <= c1; c++) {
       const cw = this.cw(c);
       if (!cw) continue;
       const x = this.colLeft(c) + cw - 1;
-      if (!skip.size) {
+      if (!skipV.size && !merges.length) {
         const top = frozen ? this.hh : this.bodyTop;
         const bottom = frozen ? this.hh + this.rowH(0) : Math.min(this.h, this.rowTop(r1) + this.rowH(r1));
         ctx.fillRect(x, top, 1, bottom - top);
         continue;
       }
       for (let r = r0; r <= r1; r++) {
-        if (skip.has(r * 65536 + c)) continue;
+        if (skipV.has(r * 65536 + c) || inMergeV(r, c)) continue;
         ctx.fillRect(x, this.rowTop(r), 1, this.rowH(r));
       }
     }
@@ -627,14 +745,24 @@ export class Grid {
     if (selVisible) {
       ctx.strokeStyle = k.accent;
       ctx.lineWidth = 1;
-      if (sel.r0 !== sel.r1 || sel.c0 !== sel.c1) ctx.strokeRect(selX0 - 0.5, selY0 - 0.5, selX1 - selX0, selY1 - selY0);
-      if (d.sel.ar >= r0 && d.sel.ar <= r1 && !this.editing) {
-        const ax = this.colLeft(d.sel.ac);
-        const ay = this.rowTop(d.sel.ar);
+      if (!single) ctx.strokeRect(selX0 - 0.5, selY0 - 0.5, selX1 - selX0, selY1 - selY0);
+      if (!this.editing && (activeM ? activeM.r1 >= r0 && activeM.r0 <= r1 : d.sel.ar >= r0 && d.sel.ar <= r1)) {
+        const b = this.cellBox(d.sel.ar, d.sel.ac);
         ctx.lineWidth = 2;
-        ctx.strokeRect(ax, ay, this.cw(d.sel.ac) - 1, this.rowH(d.sel.ar) - 1);
+        ctx.strokeRect(b.x, b.y, b.w - 1, b.h - 1);
       }
     }
+  }
+
+  /** Underline / strikethrough for one line of text. */
+  private decorate(s: Style, line: string, tx: number, ty: number, px: number, align: CanvasTextAlign) {
+    if (!s.u && !s.s) return;
+    const ctx = this.ctx;
+    const tw = ctx.measureText(line).width;
+    const lx = align === "right" ? tx - tw : align === "center" ? tx - tw / 2 : tx;
+    const th = Math.max(1, Math.round(px / 13));
+    if (s.u) ctx.fillRect(lx, Math.round(ty + px * 0.45), tw, th);
+    if (s.s) ctx.fillRect(lx, Math.round(ty), tw, th);
   }
 
   private drawColHeaders(c0: number, c1: number, sel: Rect, rhw: number) {
@@ -864,10 +992,8 @@ export class Grid {
     const e = this.editing;
     const d = this.doc;
     if (!e || !d) return;
-    const x = this.colLeft(e.c);
-    const y = this.rowTop(e.r);
-    const cw = this.cw(e.c);
-    const offscreen = (e.r >= this.fb && y < this.bodyTop - this.rh / 2) || y > this.h || x + cw < this.rowHeaderWidth() || x > this.w;
+    const { x, y, w: cw, h: ch } = this.cellBox(e.r, e.c);
+    const offscreen = (e.r >= this.fb && y + ch < this.bodyTop + 4) || y > this.h || x + cw < this.rowHeaderWidth() || x > this.w;
     this.editor.style.visibility = offscreen ? "hidden" : "visible";
     this.ctx.font = this.editor.style.font || this.font;
     const lh = parseFloat(this.editor.style.lineHeight) || 18;
@@ -882,7 +1008,7 @@ export class Grid {
       width = clamp(Math.ceil(tw + this.pad * 2 + 14), cw + 3, Math.max(cw + 3, this.w - x - 16));
       nlines = lines.length;
     }
-    const height = Math.max(this.rowH(e.r) + 3, nlines * lh + 10);
+    const height = Math.max(ch + 3, nlines * lh + 10);
     Object.assign(this.editor.style, {
       left: x - 2 + "px", top: y - 2 + "px", width: width + "px", height: height + "px",
     });
@@ -1010,7 +1136,11 @@ export class Grid {
     const s = d.sel;
     if (extend) this.select({ ...s, fr: s.fr + dr, fc: this.stepCol(s.fc, dc) });
     else {
-      const r = s.ar + dr, c = this.stepCol(s.ac, dc);
+      // Leaving a merged cell steps past its far edge.
+      const m = this.mergeAt(s.ar, s.ac);
+      const fromR = m ? (dr > 0 ? m.r1 : m.r0) : s.ar;
+      const fromC = m ? (dc > 0 ? m.c1 : m.c0) : s.ac;
+      const r = dr ? fromR + dr : s.ar, c = dc ? this.stepCol(fromC, dc) : s.ac;
       this.select({ ar: r, ac: c, fr: r, fc: c });
     }
   }

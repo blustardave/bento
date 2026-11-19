@@ -84,6 +84,19 @@ eq(fd.style(1,0).b, true, "undo sort+insert");
 fd.undo();
 eq(fd.hasFormatting(), false, "undo format");
 fd.redo();
+// Merges: keep top-left value, survive structural edits, undo exactly
+const md = new Doc("m", null);
+md.load([["h","x"],["a","b"],["c","d"],["e","f"]]);
+md.merge({ r0: 1, c0: 0, r1: 2, c1: 1 });
+eq([md.raw(1,0), md.raw(1,1), md.raw(2,0), md.merges.length], ["a","","",1], "merge clears covered cells");
+md.insertRows(2, 1);
+eq(md.merges[0], { r0: 1, c0: 0, r1: 3, c1: 1 }, "insert inside merge grows it");
+md.deleteRows([1]);
+eq(md.merges[0], { r0: 1, c0: 0, r1: 2, c1: 1 }, "delete anchor row shrinks merge");
+eq(md.sortBy(0, false), false, "sort refused with vertical merge");
+md.undo(); md.undo(); md.undo();
+eq([md.merges.length, md.raw(1,1), md.raw(2,0)], [0, "b", "c"], "undo merge restores values");
+
 (async () => {
   const bytes = await encodeBento(fd);
   const back = new Doc("g", null);
