@@ -1,0 +1,79 @@
+import { parseSync, sniffDelimiter, serialize, CsvParser } from "../src/csv";
+import { decodeBytes, encodeText } from "../src/encoding";
+import { Engine, shiftFormula } from "../src/formula";
+import { Doc } from "../src/doc";
+import { parseNum, colName, colIndex } from "../src/util";
+
+let fails = 0;
+function eq(a: unknown, b: unknown, msg: string) {
+  const ja = JSON.stringify(a), jb = JSON.stringify(b);
+  if (ja !== jb) { fails++; console.log("FAIL", msg, "\n  got", ja, "\n  exp", jb); }
+}
+
+eq(parseSync('a,b,c\n1,"x,y",3\n', ","), [["a","b","c"],["1","x,y","3"]], "basic");
+eq(parseSync('"he said ""hi""",2\r\n"multi\nline",x', ","), [['he said "hi"',"2"],["multi\nline","x"]], "quotes");
+eq(parseSync("a,\n,b", ","), [["a",""],["","b"]], "empties");
+eq(parseSync("a,b,", ","), [["a","b",""]], "trailing delim");
+eq(parseSync("", ","), [], "empty");
+eq(parseSync("a\n\nb\n", ","), [["a"],[""],["b"]], "blank line");
+eq(sniffDelimiter("a;b;c\n1;2,5;3\n4;5;6"), ";", "sniff semicolon");
+eq(sniffDelimiter("a\tb\n1\t2"), "\t", "sniff tab");
+eq(sniffDelimiter("name,age\nbob,3"), ",", "sniff comma");
+const rows = [["a","b"],["x,y",'q"']];
+eq(serialize(2,2,(r,c)=>rows[r][c],",","\r\n",true), 'a,b\r\n"x,y","q"""\r\n', "serialize");
+eq(decodeBytes(encodeText("café €", "windows-1252", false)).text, "café €", "1252 roundtrip");
+eq(decodeBytes(encodeText("café", "utf-8", true)), {text:"café",encoding:"utf-8",bom:true}, "bom");
+eq([parseNum("1,234.5"), parseNum("$12"), parseNum("45%"), parseNum("abc"), parseNum("-3e2"), parseNum("1,2")], [1234.5,12,0.45,NaN,-300,NaN], "parseNum");
+eq([colName(0), colName(25), colName(26), colName(701), colIndex("AA")], ["A","Z","AA","ZZ",26], "cols");
+
+const g = [["1","2","=A1+B1"],["3","x","=SUM(A1:B2)"],["=C1*2","=AVERAGE(A:A)","=IF(A1>0,\"pos\",\"neg\")"],["=A4","=1/0","=CONCAT(\"a\",A1,TRUE)"],["=ROUND(2.345,2)","=2^3^2","=-2^2"],["=SUM(A1:A2)*10%","=IF(FALSE,1)","=COUNT(A1:C2)"],["=IF(1,IF(0,1),5)","=MAX(A1:A2)&\"!\"", "=foo(1)"]];
+const e = new Engine({ raw:(r,c)=>g[r]?.[c] ?? "", rowCount:()=>g.length });
+const d = (r:number,c:number)=>e.display(r,c);
+eq([d(0,2), d(1,2), d(2,0), d(2,2)], ["3","6","6","pos"], "formulas 1");
+eq([d(3,0), d(3,1), d(3,2)], ["#CIRC!","#DIV/0!","a1TRUE"], "formulas 2");
+eq([d(4,0), d(4,1), d(4,2)], ["2.35","512","4"], "formulas 3");
+eq([d(5,0), d(5,1), d(5,2)], ["0.4","FALSE","5"], "formulas 4");
+eq([d(6,0), d(6,1), d(6,2)], ["FALSE","3!","#NAME?"], "formulas 5 nested IF");
+eq(d(2,1), "#CIRC!", "errors propagate through ranges");
+eq(shiftFormula("=A1+B3*$C$5", "row", 2, 1), "=A1+B4*$C$6", "shift row");
+eq(shiftFormula("=SUM(A1:C1)+D1", "col", 1, -1), "=SUM(A1:B1)+C1", "shift col delete");
+eq(shiftFormula("=B1*2", "col", 1, -1), "=#REF!*2", "deleted ref");
+eq(shiftFormula("=SUM(B:B)", "col", 0, 2), "=SUM(D:D)", "shift cols range");
+
+// Doc ops + undo
+const doc = new Doc("t", null);
+doc.load([["h1","h2"],["2","b"],["1","a"],["10","c"]]);
+doc.sortBy(0, false);
+eq(doc.rows.map(r=>r[0]), ["h1","1","2","10"], "sort numeric");
+doc.undo();
+eq(doc.rows.map(r=>r[0]), ["h1","2","1","10"], "undo sort");
+doc.setCells([{r:1,c:2,v:"=A2*2"}]);
+eq(doc.display(1,2), "4", "formula in doc");
+doc.insertRows(1, 2);
+eq(doc.raw(3,2), "=A4*2", "formula shifted on insert");
+eq(doc.display(3,2), "4", "value kept");
+doc.deleteCols(0,1);
+eq(doc.raw(3,1), "=#REF!*2", "ref error on delete");
+doc.undo(); doc.undo();
+eq(doc.raw(1,2), "=A2*2", "undo both");
+eq(doc.dirty, true, "dirty");
+doc.undo();
+eq(doc.dirty, false, "clean after full undo");
+doc.setFilter(1, new Set(["a"]));
+eq(Array.from(doc.view!), [0,1,3], "filter");
+doc.redo();
+eq(doc.toText(false), "h1,h2,\r\n2,b,=A2*2\r\n1,a,\r\n10,c,\r\n", "toText keeps ragged as rectangle");
+
+// Big parse timing
+let big = "id,name,value,date,note\n";
+const parts: string[] = [];
+for (let i=0;i<1_000_000;i++) parts.push(`${i},name ${i},${(i*1.5).toFixed(2)},2024-01-${(i%28)+1},"note, with comma"`);
+big += parts.join("\n");
+const t0 = performance.now();
+const p = new CsvParser(big, ",");
+while (!p.step(50)) {}
+console.log(`1M rows parsed in ${(performance.now()-t0).toFixed(0)}ms, rows=${p.rows.length}`);
+const bd = new Doc("big", null); bd.load(p.rows);
+const t1 = performance.now(); bd.sortBy(2, true); console.log(`sorted in ${(performance.now()-t1).toFixed(0)}ms`);
+const t2 = performance.now(); const txt = bd.toText(false); console.log(`serialized ${txt.length} chars in ${(performance.now()-t2).toFixed(0)}ms`);
+console.log(fails ? `${fails} FAILED` : "ALL PASS");
