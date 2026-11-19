@@ -87,6 +87,8 @@ export class Grid {
   private get pad() { return Math.round(BASE_PAD * this.zoom); }
   private get font() { return `${13 * this.zoom}px ${FONT_STACK}`; }
   private get fontHead() { return `${12 * this.zoom}px ${FONT_STACK}`; }
+  /** Thickness of the freeze bars / lines. */
+  private get freezeBar() { return Math.max(3, Math.round(4 * this.zoom)); }
   private get fontHeadBold() { return `600 ${12 * this.zoom}px ${FONT_STACK}`; }
   /** On-screen width of a column. */
   private cw(c: number): number { return Math.round(this.doc!.width(c) * this.zoom); }
@@ -598,26 +600,38 @@ export class Grid {
     if (fc) this.drawColHeaders(0, fc - 1, rect, rhw, bodyLeft);
     this.drawRowHeaders(r0, r1, rect, rhw);
 
-    // Freeze lines.
+    // Grid edges.
     const drag = this.drag;
     const hot = (kind: "freezeRows" | "freezeCols") => drag?.kind === kind || this.hoverFreeze === kind;
     ctx.fillStyle = k.lineStrong;
     ctx.fillRect(0, this.hh - 1, w, 1);
     ctx.fillRect(rhw - 1, 0, 1, h);
-    if (fb) { ctx.fillStyle = hot("freezeRows") ? k.accent : k.lineStrong; ctx.fillRect(0, bodyTop - 2, w, 2); }
-    if (fc) { ctx.fillStyle = hot("freezeCols") ? k.accent : k.lineStrong; ctx.fillRect(bodyLeft - 2, 0, 2, h); }
 
-    // Corner, with the two freeze handles on its bottom and right edges.
+    // Corner cell.
     ctx.fillStyle = k.bg;
     ctx.fillRect(0, 0, rhw - 1, this.hh - 1);
-    const bar = Math.max(3, Math.round(3 * this.zoom));
-    ctx.fillStyle = hot("freezeRows") ? k.accent : k.muted;
-    ctx.fillRect(0, this.hh - bar, rhw, bar);
-    ctx.fillStyle = hot("freezeCols") ? k.accent : k.muted;
-    ctx.fillRect(rhw - bar, 0, bar, this.hh);
     if (d.filters.size) {
       ctx.fillStyle = k.accent;
       this.funnel(rhw / 2 - 6, this.hh / 2 - 6);
+    }
+
+    // Freeze handles: one thickness everywhere. With nothing frozen they sit on
+    // the corner's edges; once frozen, the bar leaves the corner and becomes
+    // the line across the sheet.
+    const bar = this.freezeBar;
+    const rowsColor = hot("freezeRows") ? k.accent : k.muted;
+    const colsColor = hot("freezeCols") ? k.accent : k.muted;
+    const hidingRows = drag?.kind === "freezeRows";
+    const hidingCols = drag?.kind === "freezeCols";
+    if (!hidingRows) {
+      ctx.fillStyle = rowsColor;
+      if (fb) ctx.fillRect(0, bodyTop - bar, w, bar);
+      else ctx.fillRect(0, this.hh - bar, rhw, bar);
+    }
+    if (!hidingCols) {
+      ctx.fillStyle = colsColor;
+      if (fc) ctx.fillRect(bodyLeft - bar, 0, bar, h);
+      else ctx.fillRect(rhw - bar, 0, bar, this.hh);
     }
     this.drawFreezePreview();
   }
@@ -1144,10 +1158,10 @@ export class Grid {
     const rhw = this.rowHeaderWidth();
     const onRows = this.fb === 0
       ? x < rhw && y >= this.hh - 6 && y <= this.hh + 2
-      : Math.abs(y - (this.bodyTop - 1)) <= 3 && y > this.hh;
+      : y >= this.bodyTop - this.freezeBar - 2 && y <= this.bodyTop + 2 && y > this.hh;
     const onCols = this.fc === 0
       ? y < this.hh && x >= rhw - 6 && x <= rhw + 2
-      : Math.abs(x - (this.bodyLeft - 1)) <= 3 && y >= this.hh;
+      : x >= this.bodyLeft - this.freezeBar - 2 && x <= this.bodyLeft + 2 && y >= this.hh;
     if (onRows && onCols) return Math.abs(y - this.hh) < Math.abs(x - rhw) ? "freezeRows" : "freezeCols";
     return onRows ? "freezeRows" : onCols ? "freezeCols" : null;
   }
@@ -1183,20 +1197,26 @@ export class Grid {
     if (!drag || (drag.kind !== "freezeRows" && drag.kind !== "freezeCols") || this.freezePreview === null) return;
     const ctx = this.ctx;
     const k = this.colors;
+    const bar = this.freezeBar;
     const { x, y } = this.pointer;
     ctx.save();
     if (drag.kind === "freezeRows") {
+      // Where it will snap to, and the bar itself following the pointer.
       const pos = this.hh + this.yOf(this.freezePreview);
       ctx.fillStyle = k.accent;
-      ctx.fillRect(0, pos - 2, this.w, 3);
       ctx.globalAlpha = 0.35;
-      ctx.fillRect(0, clamp(y, this.hh, this.h) - 2, this.w, 4);
+      ctx.fillRect(0, pos - bar, this.w, bar);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = k.muted;
+      ctx.fillRect(0, clamp(y, this.hh, this.h) - bar / 2, this.w, bar);
     } else {
       const pos = this.rowHeaderWidth() + this.xs[this.freezePreview];
       ctx.fillStyle = k.accent;
-      ctx.fillRect(pos - 2, 0, 3, this.h);
       ctx.globalAlpha = 0.35;
-      ctx.fillRect(clamp(x, this.rowHeaderWidth(), this.w) - 2, 0, 4, this.h);
+      ctx.fillRect(pos - bar, 0, bar, this.h);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = k.muted;
+      ctx.fillRect(clamp(x, this.rowHeaderWidth(), this.w) - bar / 2, 0, bar, this.h);
     }
     ctx.restore();
   }
