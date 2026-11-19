@@ -61,7 +61,7 @@ export class Doc {
   widths = new Map<number, number>();
   hidden = new Set<number>();
   /** Rows / columns pinned at the top / left. Row 0 is treated as the header when rows are frozen. */
-  frozenRows = 1;
+  frozenRows = 0;
   frozenCols = 0;
   get freezeHeader(): boolean { return this.frozenRows > 0; }
   set freezeHeader(v: boolean) { this.frozenRows = v ? Math.max(1, this.frozenRows) : 0; }

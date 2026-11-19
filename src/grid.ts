@@ -22,6 +22,7 @@ interface Colors {
   bg: string; surface: string; surface2: string; line: string; lineStrong: string;
   text: string; text2: string; muted: string; accent: string; accentText: string;
   accentSoft: string; accentSofter: string; error: string; match: string; raised: string;
+  selFill: string; selHead: string; selHeadStrong: string;
 }
 
 export interface GridHooks {
@@ -135,6 +136,7 @@ export class Grid {
       lineStrong: v("--line-strong"), text: v("--text"), text2: v("--text-2"), muted: v("--muted"),
       accent: v("--accent"), accentText: v("--accent-text"), accentSoft: v("--accent-soft"),
       accentSofter: v("--accent-softer"), error: v("--error"), match: v("--match"), raised: v("--raised"),
+      selFill: v("--sel-fill"), selHead: v("--sel-head"), selHeadStrong: v("--sel-head-strong"),
     };
     this.invalidate();
   }
@@ -569,7 +571,7 @@ export class Grid {
       ctx.beginPath();
       ctx.rect(x, y, pw, ph);
       ctx.clip();
-      if (frozenRows) { ctx.fillStyle = k.surface; ctx.fillRect(x, y, pw, ph); }
+      void frozenRows;
       this.drawCells(ra, rb, ca, cb, rect, frozenRows);
       ctx.restore();
     };
@@ -595,7 +597,7 @@ export class Grid {
     if (fc) { ctx.fillStyle = hot("freezeCols") ? k.accent : k.lineStrong; ctx.fillRect(bodyLeft - 2, 0, 2, h); }
 
     // Corner, with the two freeze handles on its bottom and right edges.
-    ctx.fillStyle = k.surface;
+    ctx.fillStyle = k.bg;
     ctx.fillRect(0, 0, rhw - 1, this.hh - 1);
     const bar = Math.max(3, Math.round(3 * this.zoom));
     ctx.fillStyle = hot("freezeRows") ? k.accent : k.muted;
@@ -668,7 +670,7 @@ export class Grid {
     const activeM = this.mergeAt(d.sel.ar, d.sel.ac);
     const single = activeM ? sel.r0 === activeM.r0 && sel.r1 === activeM.r1 && sel.c0 === activeM.c0 && sel.c1 === activeM.c1 : sel.r0 === sel.r1 && sel.c0 === sel.c1;
     if (selVisible && !single) {
-      ctx.fillStyle = k.accentSoft;
+      ctx.fillStyle = k.selFill;
       ctx.fillRect(selX0, selY0, selX1 - selX0, selY1 - selY0);
     }
 
@@ -822,7 +824,7 @@ export class Grid {
     ctx.beginPath();
     ctx.rect(x0, 0, x1 - x0, hh);
     ctx.clip();
-    ctx.fillStyle = k.surface;
+    ctx.fillStyle = k.bg;
     ctx.fillRect(x0, 0, x1 - x0, hh);
     const whole = sel.r0 === 0 && sel.r1 >= this.lastRow();
     ctx.font = this.fontHead;
@@ -838,10 +840,10 @@ export class Grid {
       }
       const inSel = c >= sel.c0 && c <= sel.c1;
       if (inSel) {
-        ctx.fillStyle = whole ? k.accentSoft : k.accentSofter;
+        ctx.fillStyle = whole ? k.selHeadStrong : k.selHead;
         ctx.fillRect(x, 0, cw, hh);
       } else if (c === this.hoverCol) {
-        ctx.fillStyle = k.surface2;
+        ctx.fillStyle = k.surface;
         ctx.fillRect(x, 0, cw, hh);
       }
       ctx.fillStyle = inSel ? k.accentText : k.muted;
@@ -877,7 +879,7 @@ export class Grid {
       const rh = this.rowH(r);
       const inSel = r >= sel.r0 && r <= sel.r1;
       if (inSel) {
-        ctx.fillStyle = k.accentSofter;
+        ctx.fillStyle = k.selHead;
         ctx.fillRect(0, y, rhw, rh);
       }
       ctx.fillStyle = inSel ? k.accentText : k.muted;
@@ -891,12 +893,12 @@ export class Grid {
     ctx.beginPath();
     ctx.rect(0, this.bodyTop, rhw, h - this.bodyTop);
     ctx.clip();
-    ctx.fillStyle = k.surface;
+    ctx.fillStyle = k.bg;
     ctx.fillRect(0, this.bodyTop, rhw, h - this.bodyTop);
     for (let r = r0; r <= r1; r++) draw(r);
     ctx.restore();
     if (this.fb) {
-      ctx.fillStyle = k.surface;
+      ctx.fillStyle = k.bg;
       ctx.fillRect(0, this.hh, rhw, this.bodyTop - this.hh);
       for (let r = 0; r < this.fb; r++) draw(r);
     }
@@ -1738,10 +1740,13 @@ export class Grid {
       const { x, y } = this.pointer;
       const d = this.doc!;
       let dx = 0, dy = 0;
-      if (y > this.scroller.clientHeight - 8) dy = (y - this.scroller.clientHeight + 8) * 1.2;
-      else if (y < this.bodyTop && this.drag.kind !== "cols" && y > 0) dy = -(this.bodyTop - y) * 1.2;
-      if (x > this.scroller.clientWidth - 8) dx = (x - this.scroller.clientWidth + 8);
-      else if (x < this.bodyLeft && this.drag.kind !== "rows") dx = -(this.bodyLeft - x);
+      // Speed grows with distance past the edge, in every direction.
+      const speed = (past: number) => Math.min(80, past * 1.2);
+      const bottom = this.scroller.clientHeight - 8, right = this.scroller.clientWidth - 8;
+      if (y > bottom) dy = speed(y - bottom);
+      else if (y < this.bodyTop + 4 && this.drag.kind !== "cols" && d.scrollY > 0) dy = -speed(this.bodyTop + 4 - y);
+      if (x > right) dx = speed(x - right);
+      else if (x < this.bodyLeft + 4 && this.drag.kind !== "rows" && d.scrollX > 0) dx = -speed(this.bodyLeft + 4 - x);
       if (dx || dy) {
         this.setScroll(d.scrollX + dx, d.scrollY + dy);
         if (this.drag.kind === "fill") this.updateFillTarget(this.drag.src, x, y);

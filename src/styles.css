@@ -22,6 +22,9 @@
   --accent-text: #bd5d3c;
   --accent-soft: rgba(217, 119, 87, 0.1);
   --accent-softer: rgba(217, 119, 87, 0.06);
+  --sel-fill: rgba(217, 119, 87, 0.065);
+  --sel-head: rgba(217, 119, 87, 0.15);
+  --sel-head-strong: rgba(217, 119, 87, 0.22);
   --on-accent: #faf9f5;
   --error: #c4453a;
   --match: rgba(230, 180, 60, 0.28);
@@ -44,6 +47,9 @@
   --accent-text: #eb9a7e;
   --accent-soft: rgba(224, 138, 109, 0.16);
   --accent-softer: rgba(224, 138, 109, 0.08);
+  --sel-fill: rgba(224, 138, 109, 0.1);
+  --sel-head: rgba(224, 138, 109, 0.18);
+  --sel-head-strong: rgba(224, 138, 109, 0.26);
   --on-accent: #262624;
   --error: #ef7a6e;
   --match: rgba(230, 180, 60, 0.22);
@@ -310,17 +316,24 @@ input, textarea { font: inherit; color: inherit; }
   z-index: 5;
 }
 #empty[hidden], #loading[hidden], #drop-hint[hidden] { display: none; }
-.welcome { width: min(420px, 90%); text-align: left; }
-.welcome .mark { margin-bottom: 18px; }
+.welcome {
+  width: min(420px, 90%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  margin-top: -4vh;
+}
+.welcome .mark { margin-bottom: 14px; }
 .welcome h1 {
   font-family: var(--font-serif);
   font-weight: 400;
   font-size: 40px;
+  line-height: 1.1;
   letter-spacing: -0.01em;
-  margin: 0 0 6px;
+  margin: 0 0 22px;
 }
-.welcome p { color: var(--text-2); margin: 0 0 26px; font-size: 14px; }
-.welcome .buttons { display: flex; gap: 8px; margin-bottom: 30px; }
+.welcome .buttons { display: flex; justify-content: center; gap: 8px; }
 .btn {
   height: 32px;
   padding: 0 14px;
@@ -334,26 +347,25 @@ input, textarea { font: inherit; color: inherit; }
 .btn.primary { background: var(--accent); color: var(--on-accent); box-shadow: none; }
 .btn.primary:hover { filter: brightness(1.05); }
 .btn kbd { font: 11px var(--font-ui); opacity: 0.6; }
+.welcome .hint { color: var(--muted); font-size: 12px; margin-top: 14px; }
 .welcome h2 {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--muted);
-  margin: 0 0 8px;
+  margin: 34px 0 6px;
 }
-.recent { display: flex; flex-direction: column; }
+.recent { display: flex; flex-direction: column; align-items: stretch; width: 100%; }
 .recent button {
-  text-align: left;
+  text-align: center;
   padding: 7px 10px;
-  margin: 0 -10px;
   border-radius: 7px;
   display: flex; flex-direction: column;
   transition: background var(--ease);
 }
 .recent button:hover { background: var(--surface); }
 .recent .path { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.welcome .hint { color: var(--muted); font-size: 12px; margin-top: 26px; }
 
 #loading {
   position: absolute; inset: 0;

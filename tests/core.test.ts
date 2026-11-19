@@ -46,6 +46,7 @@ eq(shiftFormula("=SUM(B:B)", "col", 0, 2), "=SUM(D:D)", "shift cols range");
 // Doc ops + undo
 const doc = new Doc("t", null);
 doc.load([["h1","h2"],["2","b"],["1","a"],["10","c"]]);
+doc.frozenRows = 1;
 doc.sortBy(0, false);
 eq(doc.rows.map(r=>r[0]), ["h1","1","2","10"], "sort numeric");
 doc.undo();
@@ -75,6 +76,7 @@ eq([formatDate(parseDate("2026-01-04")!, "long"), formatDate(parseDate("31/01/20
 // Formatting moves with rows, undoes, and survives .bento
 const fd = new Doc("f", null);
 fd.load([["h"],["b"],["a"],["c"]]);
+fd.frozenRows = 1;
 fd.format([{r:1,c:0}], (s)=>({...s, b:true, color:"@red"}));
 fd.sortBy(0, false);
 eq([fd.raw(2,0), fd.style(2,0).b, fd.style(1,0).b], ["b", true, undefined], "style follows row on sort");
@@ -88,6 +90,7 @@ fd.redo();
 // Merges: keep top-left value, survive structural edits, undo exactly
 const md = new Doc("m", null);
 md.load([["h","x"],["a","b"],["c","d"],["e","f"]]);
+md.frozenRows = 1;
 md.merge({ r0: 1, c0: 0, r1: 2, c1: 1 });
 eq([md.raw(1,0), md.raw(1,1), md.raw(2,0), md.merges.length], ["a","","",1], "merge clears covered cells");
 md.insertRows(2, 1);

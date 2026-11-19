@@ -109,7 +109,6 @@ export class App {
   newDoc() {
     this.untitled++;
     const d = this.makeDoc(this.untitled === 1 ? "Untitled.bento" : `Untitled ${this.untitled}.bento`, null);
-    d.freezeHeader = true;
     this.docs.push(d);
     this.activate(d);
   }
@@ -358,11 +357,10 @@ export class App {
     box.append(el("div", { class: "welcome" },
       el("div", { class: "mark" }, svg(LOGO, 44)),
       el("h1", { text: "Bento" }),
-      el("p", { text: "A calm, quick place for your spreadsheets and CSV files." }),
       el("div", { class: "buttons" }, open, blank),
+      el("div", { class: "hint", text: "Or drop a file anywhere in this window." }),
       recent.length ? el("h2", { text: "Recent" }) : null,
       recent.length ? list : null,
-      el("div", { class: "hint", text: "Or drop a file anywhere in this window." }),
     ));
   }
 
