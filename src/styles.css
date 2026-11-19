@@ -743,3 +743,26 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .find-opt:hover { color: var(--text); background: var(--surface); }
 .find-opt.on { color: var(--accent-text); font-weight: 600; }
 .find-opt.strong { color: var(--accent-text); font-weight: 600; }
+
+/* Decimal buttons: text + crisp 1px arrow. */
+#toolbar .tb.dec-btn { padding: 0 5px; }
+.dec-icon { position: relative; display: block; width: 20px; height: 18px; }
+.dec-icon .dec-text {
+  position: absolute; top: 0; left: 1px;
+  font-size: 12px; font-weight: 600; line-height: 12px;
+  letter-spacing: 0.02em;
+}
+.dec-icon svg {
+  position: absolute; bottom: 0;
+  fill: none !important; stroke: currentColor; stroke-width: 1 !important;
+  stroke-linecap: square; stroke-linejoin: miter;
+  shape-rendering: crispEdges;
+}
+.dec-icon svg .head { fill: currentColor !important; stroke: none; shape-rendering: geometricPrecision; }
+.dec-left svg { left: 6px; }
+.dec-right svg { left: 9px; }
+
+/* Status bar: text optically centred. */
+#status { line-height: 1; }
+#status .item { display: inline-flex; align-items: center; height: 20px; padding: 0 6px 1px; line-height: 1; }
+#status .sep { display: inline-flex; align-items: center; height: 20px; padding-bottom: 1px; }

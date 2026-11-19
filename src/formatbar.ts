@@ -32,6 +32,20 @@ export interface FormatGroups {
   align: HTMLElement[];
 }
 
+/**
+ * ".0 ←" / ".00 →": real text (crisp at any scaling) with a pixel-exact
+ * arrow tucked underneath, rather than tiny drawn curves.
+ */
+function decimalButton(label: string, dir: "left" | "right", title: string, onClick: () => void): ToolButton {
+  const b = toolButton({ title, onClick });
+  const arrow = dir === "left"
+    ? '<path d="M10.5 3.5H3"/><path d="M0.5 3.5 4 0.75v5.5Z" class="head"/>'
+    : '<path d="M0.5 3.5H8"/><path d="M10.5 3.5 7 0.75v5.5Z" class="head"/>';
+  b.el.classList.add("dec-btn");
+  b.el.innerHTML = `<span class="dec-icon dec-${dir}"><span class="dec-text">${label}</span><svg viewBox="0 0 11 7" width="11" height="7" aria-hidden="true">${arrow}</svg></span>`;
+  return b;
+}
+
 export class FormatBar {
   private t: Record<string, ToolButton> = {};
   private size!: HTMLInputElement;
@@ -49,8 +63,8 @@ export class FormatBar {
         c.apply((s) => ({ ...s, nf: s.nf?.k === "cur" ? undefined : { k: "cur", cur: defaultCurrency(), dp: 2, sep: true } }), "Currency") })),
       t("pct", toolButton({ glyph: "%", glyphClass: "sym", title: "Format as percent", onClick: () =>
         c.apply((s) => ({ ...s, nf: s.nf?.k === "pct" ? undefined : { k: "pct", dp: 2 } }), "Percent") })),
-      t("decDown", toolButton({ icon: "decDown", title: "Decrease decimal places", onClick: () => this.stepDecimals(-1) })),
-      t("decUp", toolButton({ icon: "decUp", title: "Increase decimal places", onClick: () => this.stepDecimals(1) })),
+      t("decDown", decimalButton(".0", "left", "Decrease decimal places", () => this.stepDecimals(-1))),
+      t("decUp", decimalButton(".00", "right", "Increase decimal places", () => this.stepDecimals(1))),
       t("numFmt", toolButton({ glyph: "123", glyphClass: "sym small", caret: true, title: "More formats", onClick: (b) => {
         const r = b.getBoundingClientRect();
         const isText = c.active()?.style.nf?.k === "text";
