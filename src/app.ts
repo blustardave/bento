@@ -610,44 +610,80 @@ export class App {
         lock, el("span", { class: "label", text: s.sheetName }), s === d ? caret : null);
       const bg = resolveColor(s.tabColor, theme);
       if (bg) tab.style.background = bg;
-      // Click to switch, drag to reorder.
+      // Click to switch; hold or drag to lift the tab and slide it into place,
+      // with its neighbours stepping aside as it passes them.
       tab.addEventListener("pointerdown", (e) => {
         if (e.button !== 0 || caret.contains(e.target as Node)) return;
+        e.preventDefault();
         const startX = e.clientX;
-        let dragging = false;
+        let lifted = false;
         let to = i;
-        const marker = el("div", { class: "sheet-drop" });
-        const move = (ev: PointerEvent) => {
-          if (!dragging && Math.abs(ev.clientX - startX) < 5) return;
-          if (!dragging) { dragging = true; tab.classList.add("dragging"); tabs.append(marker); document.body.classList.add("grabbing"); }
-          // Insertion point = the gap nearest the pointer.
-          to = els.length;
-          for (let k = 0; k < els.length; k++) {
-            const r = els[k].getBoundingClientRect();
-            if (ev.clientX < r.left + r.width / 2) { to = k; break; }
-          }
-          const ref = els[Math.min(to, els.length - 1)].getBoundingClientRect();
-          const host = tabs.getBoundingClientRect();
-          marker.style.left = `${(to < els.length ? ref.left : ref.right) - host.left + tabs.scrollLeft - 1}px`;
+        let dx = 0;
+        const rects = els.map((t) => t.getBoundingClientRect());
+        const me = rects[i];
+        const gap = rects.length > 1 ? rects[1].left - rects[0].right : 0;
+        const step = me.width + gap;
+        const strip = tabs.getBoundingClientRect();
+        const lift = () => {
+          if (lifted) return;
+          lifted = true;
+          tabs.classList.add("reordering");
+          tab.classList.add("lifted");
+          document.body.classList.add("grabbing");
         };
-        const up = () => {
-          window.removeEventListener("pointermove", move);
-          window.removeEventListener("pointerup", up);
-          document.body.classList.remove("grabbing");
-          marker.remove();
-          tab.classList.remove("dragging");
-          if (!dragging) { if (s !== d) this.showSheet(s); return; }
-          const target = to > i ? to - 1 : to;
-          if (target !== i) {
+        const hold = window.setTimeout(lift, 220);
+        const place = () => {
+          // Keep the tab inside the strip.
+          dx = Math.max(strip.left - me.left, Math.min(strip.right - me.right, dx));
+          tab.style.transform = `translate(${dx}px, -2px)`;
+          const centre = me.left + me.width / 2 + dx;
+          to = i;
+          for (let k = 0; k < rects.length; k++) {
+            if (k === i) continue;
+            const c = rects[k].left + rects[k].width / 2;
+            if (k > i && centre > c) to = k;
+            if (k < i && centre < c && to === i) to = k;
+          }
+          els.forEach((t, k) => {
+            if (k === i) return;
+            const shift = to > i && k > i && k <= to ? -step : to < i && k >= to && k < i ? step : 0;
+            t.style.transform = shift ? `translateX(${shift}px)` : "";
+          });
+        };
+        const move = (ev: PointerEvent) => {
+          if (!lifted && Math.abs(ev.clientX - startX) < 4) return;
+          lift();
+          dx = ev.clientX - startX;
+          place();
+        };
+        const finish = () => {
+          els.forEach((t) => (t.style.transform = ""));
+          tabs.classList.remove("reordering", "settling");
+          tab.classList.remove("lifted");
+          if (to !== i) {
             book.sheets.splice(i, 1);
-            book.sheets.splice(target, 0, s);
+            book.sheets.splice(to, 0, s);
             book.current = book.sheets.indexOf(this.active!);
             book.structureDirty = true;
           }
           this.render();
         };
+        const up = () => {
+          window.clearTimeout(hold);
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+          window.removeEventListener("pointercancel", up);
+          document.body.classList.remove("grabbing");
+          if (!lifted) { if (s !== d) this.showSheet(s); return; }
+          // Glide into the gap that opened up, then commit the new order.
+          const slot = to > i ? rects[to].right - me.right : to < i ? rects[to].left - me.left : 0;
+          tabs.classList.add("settling");
+          tab.style.transform = `translate(${slot}px, 0)`;
+          window.setTimeout(finish, 160);
+        };
         window.addEventListener("pointermove", move);
         window.addEventListener("pointerup", up);
+        window.addEventListener("pointercancel", up);
       });
       caret.addEventListener("click", (e) => { e.stopPropagation(); const r = tab.getBoundingClientRect(); this.sheetMenu(s, r.left, r.top, tab); });
       tab.addEventListener("dblclick", () => this.renameSheet(s));
