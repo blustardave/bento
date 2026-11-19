@@ -18,10 +18,10 @@
       <header id="titlebar" data-tauri-drag-region>
         <button id="menu-btn" class="logo-btn" title="Menu">
           <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <rect x="2" y="2" width="20" height="20" rx="5" fill="var(--accent)" />
-            <rect x="5.2" y="5.2" width="6.2" height="13.6" rx="1.6" fill="var(--on-accent)" />
-            <rect x="12.6" y="5.2" width="6.2" height="6.2" rx="1.6" fill="var(--on-accent)" />
-            <rect x="12.6" y="12.6" width="6.2" height="6.2" rx="1.6" fill="var(--on-accent)" opacity=".55" />
+            <rect x="2" y="2" width="20" height="20" rx="5" fill="#d97757" />
+            <rect x="5.2" y="5.2" width="6.2" height="13.6" rx="1.6" fill="#fbf9f4" />
+            <rect x="12.6" y="5.2" width="6.2" height="6.2" rx="1.6" fill="#fbf9f4" />
+            <rect x="12.6" y="12.6" width="6.2" height="6.2" rx="1.6" fill="#fbf9f4" opacity=".55" />
           </svg>
         </button>
         <div id="tabs"></div>
@@ -50,6 +50,7 @@
         <div id="cell-name">A1</div>
         <div class="fx">fx</div>
         <input id="cell-input" spellcheck="false" autocomplete="off" />
+        <button id="toolbar-toggle" class="icon-btn" title="Hide the toolbar (Ctrl+Shift+F)"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4.5 9.75 8 6.25l3.5 3.5"/></svg></button>
       </div>
 
       <main id="main">
@@ -65,7 +66,7 @@
 
       <footer id="status">
         <div id="status-left"></div>
-        <div id="status-right"></div>
+        <div id="status-right"><span id="status-stats"></span><span id="status-dims"></span></div>
       </footer>
     </div>
     <div id="drop-hint" hidden><div>Drop to open</div></div>

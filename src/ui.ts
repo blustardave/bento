@@ -12,7 +12,7 @@ export function closeMenus() {
 }
 
 /** Show a popup menu at (x, y). Closes on pick, Escape, or click outside. */
-export function showMenu(items: MenuItem[], x: number, y: number, onClose?: () => void) {
+export function showMenu(items: MenuItem[], x: number, y: number, onClose?: () => void, dir: "down" | "up" = "down") {
   closeMenus();
   const menu = el("div", { class: "menu", role: "menu" });
   const buttons: HTMLButtonElement[] = [];
@@ -38,7 +38,7 @@ export function showMenu(items: MenuItem[], x: number, y: number, onClose?: () =
   // Keep it on screen.
   const r = menu.getBoundingClientRect();
   const vx = Math.min(x, window.innerWidth - r.width - 6);
-  const vy = y + r.height > window.innerHeight - 6 ? Math.max(6, y - r.height) : y;
+  const vy = dir === "up" ? Math.max(6, y - r.height) : y + r.height > window.innerHeight - 6 ? Math.max(6, y - r.height) : y;
   menu.style.left = Math.max(6, vx) + "px";
   menu.style.top = vy + "px";
 

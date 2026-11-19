@@ -121,9 +121,16 @@ eq(fillValues(["a","b"], 3, true), ["b","a","b"], "text repeats backwards");
 eq(fillValues(["1","x"], 3, false), ["1","x","1"], "mixed repeats");
 
 (async () => {
-  const bytes = await encodeBento(fd);
+  // Two sheets in one file.
+  const extra = new Doc("f", null, fd.book);
+  extra.sheetName = "Totals";
+  extra.load([["sum"], ["42"]]);
+  fd.book.sheets.push(extra);
+  fd.book.current = 1;
+  const bytes = await encodeBento(fd.book);
   const back = new Doc("g", null);
-  await decodeBento(bytes, back);
+  await decodeBento(bytes, back.book, (name) => { const d = new Doc("g", null, back.book); d.sheetName = name; return d; });
+  eq([back.book.sheets.length, back.book.sheets[1].sheetName, back.book.sheets[1].raw(1, 0), back.book.current], [2, "Totals", "42", 1], "multi-sheet round trip");
   eq([back.rows.length, back.style(1,0).color, back.style(2,0).b], [4, "@red", undefined], "bento round trip");
     if (fails) process.exit(1);
 })();

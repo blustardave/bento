@@ -1,30 +1,44 @@
 /**
  * The .bento file: gzip-compressed JSON holding the data plus everything
- * CSV can't — formatting, formulas, column widths, frozen header, filters.
+ * CSV can't — several sheets, formatting, formulas, column widths, frozen
+ * rows/columns, merges, filters.
+ *
+ * Version 1 held a single sheet at the top level; version 2 holds a list of
+ * sheets. Both are read.
  */
 import { Delimiter, LineEnding } from "./csv";
-import { Doc } from "./doc";
+import { Book, Doc } from "./doc";
 import { Encoding } from "./encoding";
 import { Style } from "./format";
 
-export const BENTO_VERSION = 1;
+export const BENTO_VERSION = 2;
 
-interface BentoFile {
-  format: "bento";
-  version: number;
+/** One sheet's contents, as stored in the file. */
+export interface SheetData {
+  name?: string;
   rows: string[][];
   /** Style table; index 0 is always {} (no formatting). */
   styles: Style[];
   /** [row index, style id per column] for rows that have formatting. */
   cellStyles: [number, number[]][];
   columns: { widths: Record<string, number>; hidden: number[] };
-  freezeHeader: boolean;
+  freezeHeader?: boolean; // v1 only
   frozenRows?: number;
   frozenCols?: number;
   /** Merged ranges [r0, c0, r1, c1]. */
   merges?: [number, number, number, number][];
   filters: Record<string, string[]>;
-  csv: { delimiter: Delimiter; lineEnding: LineEnding; encoding: Encoding; bom: boolean };
+  csv?: CsvSettings;
+}
+
+interface CsvSettings { delimiter: Delimiter; lineEnding: LineEnding; encoding: Encoding; bom: boolean }
+
+interface BentoFileV2 {
+  format: "bento";
+  version: number;
+  sheets: SheetData[];
+  active?: number;
+  csv?: CsvSettings;
 }
 
 export function isBentoPath(p: string | null | undefined): boolean {
@@ -46,7 +60,8 @@ async function gunzip(bytes: Uint8Array): Promise<string> {
   return new Response(stream).text();
 }
 
-export async function encodeBento(doc: Doc): Promise<Uint8Array> {
+/** Snapshot one sheet (also used to duplicate sheets). */
+export function sheetToData(doc: Doc): SheetData {
   // Drop rows at the end that hold nothing at all.
   let n = doc.rows.length;
   while (n > 0 && doc.rows[n - 1].every((v) => v === "") && !doc.rowStyleArray(n - 1)?.some((x) => x)) n--;
@@ -65,13 +80,12 @@ export async function encodeBento(doc: Doc): Promise<Uint8Array> {
     while (out.length && out[out.length - 1] === 0) out.pop();
     cellStyles.push([r, out]);
   }
-  const file: BentoFile = {
-    format: "bento",
-    version: BENTO_VERSION,
+  return {
+    name: doc.sheetName,
     rows: doc.rows.slice(0, n).map((row) => {
       let end = row.length;
       while (end > 0 && row[end - 1] === "") end--;
-      return end === row.length ? row : row.slice(0, end);
+      return row.slice(0, end);
     }),
     styles,
     cellStyles,
@@ -79,28 +93,19 @@ export async function encodeBento(doc: Doc): Promise<Uint8Array> {
       widths: Object.fromEntries([...doc.widths].map(([k, v]) => [String(k), Math.round(v)])),
       hidden: [...doc.hidden],
     },
-    freezeHeader: doc.freezeHeader,
     frozenRows: doc.frozenRows,
     frozenCols: doc.frozenCols,
     merges: doc.merges.filter((m) => m.r0 < n).map((m) => [m.r0, m.c0, Math.min(m.r1, n - 1), m.c1]),
     filters: Object.fromEntries([...doc.filters].map(([k, v]) => [String(k), [...v]])),
     csv: { delimiter: doc.delim, lineEnding: doc.eol, encoding: doc.encoding, bom: doc.bom },
   };
-  return gzip(JSON.stringify(file));
 }
 
-export async function decodeBento(bytes: Uint8Array, doc: Doc) {
-  let file: BentoFile;
-  try {
-    file = JSON.parse(await gunzip(bytes));
-  } catch {
-    throw new Error("This doesn't look like a Bento sheet — the file may be damaged.");
-  }
-  if (file.format !== "bento") throw new Error("This doesn't look like a Bento sheet.");
-  if (file.version > BENTO_VERSION) throw new Error("This sheet was made by a newer version of Bento. Update Bento to open it.");
+/** Fill a sheet from stored data. */
+export function sheetFromData(doc: Doc, file: SheetData) {
   doc.load(file.rows ?? []);
-  for (const s of (file.styles ?? []).slice(1)) doc.intern(s);
-  // Map file style ids → this doc's ids (interning can reorder duplicates).
+  if (file.name) doc.sheetName = file.name;
+  // Map file style ids → this doc's ids (interning can merge duplicates).
   const map = (file.styles ?? [{}]).map((s) => doc.intern(s));
   for (const [r, st] of file.cellStyles ?? []) doc.setRowStyleArray(r, st.map((id) => map[id] ?? 0));
   doc.widths = new Map(Object.entries(file.columns?.widths ?? {}).map(([k, v]) => [Number(k), v]));
@@ -116,4 +121,38 @@ export async function decodeBento(bytes: Uint8Array, doc: Doc) {
     doc.bom = !!file.csv.bom;
   }
   doc.refreshView();
+}
+
+export async function encodeBento(book: Book): Promise<Uint8Array> {
+  const file: BentoFileV2 = {
+    format: "bento",
+    version: BENTO_VERSION,
+    sheets: book.sheets.map(sheetToData),
+    active: book.current,
+  };
+  return gzip(JSON.stringify(file));
+}
+
+/**
+ * Read a .bento file into `book`. The book's first sheet is reused; further
+ * sheets are made with `makeSheet`.
+ */
+export async function decodeBento(bytes: Uint8Array, book: Book, makeSheet: (name: string) => Doc) {
+  let raw: (BentoFileV2 & SheetData) | null;
+  try {
+    raw = JSON.parse(await gunzip(bytes));
+  } catch {
+    throw new Error("This doesn't look like a Bento sheet — the file may be damaged.");
+  }
+  if (!raw || raw.format !== "bento") throw new Error("This doesn't look like a Bento sheet.");
+  if (raw.version > BENTO_VERSION) throw new Error("This sheet was made by a newer version of Bento. Update Bento to open it.");
+  const sheets: SheetData[] = raw.version >= 2 && Array.isArray(raw.sheets) ? raw.sheets : [raw];
+  const first = book.sheets[0];
+  book.sheets = [first];
+  sheets.forEach((data, i) => {
+    const doc = i === 0 ? first : makeSheet(data.name ?? `Sheet${i + 1}`);
+    if (i > 0) book.sheets.push(doc);
+    sheetFromData(doc, { ...data, name: data.name ?? `Sheet${i + 1}` });
+  });
+  book.current = Math.min(Math.max(0, raw.active ?? 0), book.sheets.length - 1);
 }

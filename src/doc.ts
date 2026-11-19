@@ -51,8 +51,16 @@ export const DEFAULT_WIDTH = 100;
 
 export class Doc {
   readonly id = nextId++;
-  name: string;
-  path: string | null;
+  /** The file this sheet belongs to. Name, path and source are the file's. */
+  book: Book;
+  /** This sheet's own name (shown on the tab at the bottom). */
+  sheetName = "Sheet1";
+  get name(): string { return this.book.name; }
+  set name(v: string) { this.book.name = v; }
+  get path(): string | null { return this.book.path; }
+  set path(v: string | null) { this.book.path = v; }
+  get source(): import("./native").FileRef | null { return this.book.source; }
+  set source(v: import("./native").FileRef | null) { this.book.source = v; }
   rows: string[][] = [];
   cols = 0;
   /** Rows/cols that belong in the saved file even if empty. */
@@ -84,7 +92,6 @@ export class Doc {
   loading: number | null = null;
   saveFormulasAs: "values" | "formulas" | null = null;
   /** Where the file came from, so it can be re-read with other settings. */
-  source: import("./native").FileRef | null = null;
 
   /**
    * Formatting lives beside each row (keyed by the row array itself), so it
@@ -110,9 +117,9 @@ export class Doc {
   /** Bumped on every change, so views know to redraw. */
   version = 0;
 
-  constructor(name: string, path: string | null) {
-    this.name = name;
-    this.path = path;
+  constructor(name: string, path: string | null, book?: Book) {
+    this.book = book ?? new Book(name, path);
+    if (!book) this.book.sheets.push(this);
     this.engine = new Engine({ raw: (r, c) => this.raw(r, c), rowCount: () => this.rows.length });
   }
 
@@ -737,4 +744,38 @@ function shiftSet(s: Set<number>, at: number, delta: number): Set<number> {
   const out = new Set<number>();
   for (const k of s) out.add(k >= at ? k + delta : k);
   return out;
+}
+
+
+/** A file: one or more sheets, plus the file's name and location. */
+export class Book {
+  name: string;
+  path: string | null;
+  source: import("./native").FileRef | null = null;
+  sheets: Doc[] = [];
+  current = 0;
+  /** Sheets added, removed, renamed or reordered since the last save. */
+  structureDirty = false;
+
+  constructor(name: string, path: string | null) {
+    this.name = name;
+    this.path = path;
+  }
+
+  get sheet(): Doc { return this.sheets[this.current]; }
+
+  get dirty(): boolean {
+    return this.structureDirty || this.sheets.some((s) => s.dirty);
+  }
+
+  markSaved() {
+    this.structureDirty = false;
+    for (const s of this.sheets) s.markSaved();
+  }
+
+  /** A sheet name not already taken: "Sheet2", "Sheet3"… */
+  freshName(base = "Sheet"): string {
+    const taken = new Set(this.sheets.map((s) => s.sheetName.toLowerCase()));
+    for (let i = 1; ; i++) { const n = `${base}${i}`; if (!taken.has(n.toLowerCase())) return n; }
+  }
 }

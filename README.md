@@ -10,8 +10,8 @@ Every push to `main` builds a fresh installer automatically (see `.github/workfl
 
 ## Files
 
-- **`.bento`** is Bento's own format: it keeps the data plus formatting, formulas, column widths, the frozen header and filters. It's gzip-compressed JSON, often smaller than the CSV it came from. **Ctrl+S** always saves a `.bento`.
-- **CSV/TSV** files open as normal. Saving one creates a `.bento` beside it and leaves the original untouched. **Export as CSV…** (Ctrl+E) writes a plain CSV at any time, using the encoding, delimiter and line endings shown in the status bar.
+- **`.bento`** is Bento's own format: it can hold several sheets (tabs along the bottom) and keeps the data plus formatting, formulas, column widths, the frozen header and filters. It's gzip-compressed JSON, often smaller than the CSV it came from. **Ctrl+S** always saves a `.bento`.
+- **CSV/TSV** files open as normal. Saving one creates a `.bento` beside it and leaves the original untouched. **Export as CSV…** (Ctrl+E) writes the current sheet as a plain CSV, letting you pick the separator, encoding and line endings.
 
 ## What it does
 

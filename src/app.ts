@@ -1,10 +1,10 @@
-import { CsvParser, Delimiter, LineEnding, delimiterLabel, sniffDelimiter, sniffLineEnding } from "./csv";
-import { Doc, allRects, selRect } from "./doc";
-import { Encoding, decodeBytes, encodeText, encodingLabel } from "./encoding";
+import { CsvParser, Delimiter, LineEnding, sniffDelimiter, sniffLineEnding } from "./csv";
+import { Book, Doc, allRects, selRect } from "./doc";
+import { Encoding, decodeBytes, encodeText } from "./encoding";
 import { openFilter } from "./filter";
 import { FindPanel } from "./find";
 import { Grid } from "./grid";
-import { decodeBento, encodeBento, isBentoPath, looksLikeBento } from "./bento";
+import { decodeBento, encodeBento, isBentoPath, looksLikeBento, sheetFromData, sheetToData } from "./bento";
 import {
   FileRef, isTauri, launchFiles, onFileDrop, onOpenFiles, pickFiles, pickSavePath, readFile,
   windowControls, writeFile,
@@ -115,9 +115,18 @@ export class App {
   }
 
   /** Every sheet asks the grid to measure tall rows (wrapped text, big fonts). */
-  private makeDoc(name: string, path: string | null): Doc {
-    const d = new Doc(name, path);
+  private makeDoc(name: string, path: string | null, book?: Book): Doc {
+    const d = new Doc(name, path, book);
     d.measureRow = (r) => this.grid.measureRow(d, r);
+    return d;
+  }
+
+  /** A new, empty sheet in an existing file (not yet added to it). */
+  private makeSheet(book: Book, sheetName: string): Doc {
+    const d = this.makeDoc(book.name, book.path, book);
+    d.sheetName = sheetName;
+    const base = book.sheets[0];
+    if (base) { d.delim = base.delim; d.eol = base.eol; d.encoding = base.encoding; d.bom = base.bom; }
     return d;
   }
 
@@ -141,7 +150,7 @@ export class App {
       doc.source = ref;
       doc.loading = 0;
       // Replace a pristine empty "Untitled" tab instead of piling up tabs.
-      const blank = this.active && !this.active.path && !this.active.dirty && this.active.rows.length === 0 ? this.active : null;
+      const blank = this.active && !this.active.path && !this.active.book.dirty && this.active.book.sheets.length === 1 && this.active.rows.length === 0 ? this.active : null;
       if (blank) this.docs.splice(this.docs.indexOf(blank), 1, doc);
       else this.docs.push(doc);
       this.activate(doc);
@@ -162,12 +171,19 @@ export class App {
     this.renderLoading();
     const bytes = await readFile(ref);
     if (isBentoPath(ref.name) || looksLikeBento(bytes)) {
-      await decodeBento(bytes, doc);
-      doc.loading = null;
-      if (!doc.widths.size) this.grid.autoFitInitial(doc);
-      doc.remeasureAll();
-      doc.markSaved();
-      if (this.active === doc) this.grid.setDoc(doc);
+      const book = doc.book;
+      await decodeBento(bytes, book, (name) => this.makeSheet(book, name));
+      for (const sh of book.sheets) {
+        sh.loading = null;
+        if (!sh.widths.size) this.grid.autoFitInitial(sh);
+        sh.remeasureAll();
+      }
+      book.markSaved();
+      // Show the sheet that was open when the file was saved.
+      const shown = book.sheet;
+      const i = this.docs.indexOf(doc);
+      if (shown !== doc && i >= 0) this.docs[i] = shown;
+      if (this.active === doc) this.activate(shown);
       this.render();
       this.onSelection();
       return;
@@ -210,7 +226,7 @@ export class App {
 
   async closeDoc(doc: Doc): Promise<boolean> {
     if (this.grid.editing && this.active === doc) this.grid.commitEdit();
-    if (doc.dirty) {
+    if (doc.book.dirty) {
       if (this.active !== doc) this.activate(doc);
       const choice = await modal(`Save changes to ${doc.name}?`, "Your changes will be lost if you don't save them.", [
         { label: "Cancel", value: "cancel" },
@@ -226,7 +242,7 @@ export class App {
 
   private async confirmQuit(): Promise<boolean> {
     for (const d of [...this.docs]) {
-      if (!d.dirty) continue;
+      if (!d.book.dirty) continue;
       if (!(await this.closeDoc(d))) return false;
     }
     return true;
@@ -245,11 +261,11 @@ export class App {
       if (!isBentoPath(path)) path += ".bento";
     }
     try {
-      await writeFile(path, await encodeBento(doc));
+      await writeFile(path, await encodeBento(doc.book));
       doc.path = path;
       doc.name = basename(path);
       if (isTauri) doc.source = { name: doc.name, path };
-      doc.markSaved();
+      doc.book.markSaved();
       this.addRecent(path);
       this.render();
       toast(`Saved ${doc.name}`);
@@ -260,38 +276,25 @@ export class App {
     }
   }
 
-  /** Write a plain CSV copy. The sheet itself stays as it is. */
+  /**
+   * Write a plain CSV copy of the current sheet. The options (delimiter,
+   * encoding, line endings, formulas) are chosen in a small dialog and
+   * remembered with the file.
+   */
   async exportCsv(doc: Doc | null = this.active): Promise<boolean> {
     if (!doc || doc.loading !== null) return false;
     if (this.grid.editing && this.active === doc) this.grid.commitEdit();
+    const opts = await this.csvDialog(doc, "export");
+    if (!opts) return false;
+    doc.delim = opts.delim; doc.encoding = opts.encoding; doc.bom = opts.bom; doc.eol = opts.eol;
+    if (opts.formulas) doc.saveFormulasAs = opts.formulas;
     const base = (doc.path ?? doc.name).replace(/\.[^.\\/]+$/, "");
-    let path = await pickSavePath(base + (doc.delim === "\t" ? ".tsv" : ".csv"), "csv");
+    const sheetPart = doc.book.sheets.length > 1 ? ` - ${doc.sheetName}` : "";
+    let path = await pickSavePath(base + sheetPart + (doc.delim === "\t" ? ".tsv" : ".csv"), "csv");
     if (!path) return false;
     if (!/\.(csv|tsv|txt)$/i.test(path)) path += ".csv";
-    const delim = /\.tsv$/i.test(path) ? "\t" as const : doc.delim === "\t" ? "," as const : doc.delim;
-    let asValues = false;
-    if (doc.hasFormulas()) {
-      let mode = doc.saveFormulasAs;
-      if (!mode) {
-        mode = await modal(
-          "This sheet has formulas",
-          "CSV files can't store formulas. Export the calculated values, or the formulas as text? (Excel and Google Sheets recalculate formulas saved as text.)",
-          [
-            { label: "Cancel", value: null },
-            { label: "Formulas as text", value: "formulas" as const },
-            { label: "Values", value: "values" as const, primary: true },
-          ],
-        );
-        if (!mode) return false;
-        doc.saveFormulasAs = mode;
-      }
-      asValues = mode === "values";
-    }
     try {
-      const saved = doc.delim;
-      doc.delim = delim;
-      const text = doc.toText(asValues);
-      doc.delim = saved;
+      const text = doc.toText(doc.saveFormulasAs !== "formulas");
       await writeFile(path, encodeText(text, doc.encoding, doc.bom));
       toast(`Exported ${basename(path)}${doc.hasFormatting() ? " (formatting isn't kept in CSV)" : ""}`);
       return true;
@@ -299,6 +302,199 @@ export class App {
       toast(String(e instanceof Error ? e.message : e), true);
       return false;
     }
+  }
+
+  /** Pick CSV settings: for exporting, or for re-reading a CSV that was split wrongly. */
+  private csvDialog(doc: Doc, mode: "export" | "reopen"): Promise<{ delim: Delimiter; encoding: Encoding; bom: boolean; eol: LineEnding; formulas?: "values" | "formulas" } | null> {
+    closeMenus();
+    return new Promise((resolve) => {
+      const select = (label: string, options: [string, string][], value: string) => {
+        const sel = el("select", { class: "field" });
+        for (const [v, t] of options) sel.append(el("option", { value: v, text: t }));
+        sel.value = value;
+        return { row: el("label", { class: "pref" }, el("span", { text: label }), sel), sel };
+      };
+      const delim = select("Separator", [[",", "Comma ( , )"], [";", "Semicolon ( ; )"], ["\t", "Tab"], ["|", "Pipe ( | )"]], doc.delim);
+      const enc = select("Encoding", [["utf-8", "UTF-8"], ["utf-8-bom", "UTF-8 with BOM (best for Excel)"], ["windows-1252", "Windows-1252"], ["utf-16le", "UTF-16 LE"]],
+        doc.encoding === "utf-8" && doc.bom ? "utf-8-bom" : doc.encoding);
+      const eol = select("Line endings", [["\r\n", "Windows (CRLF)"], ["\n", "Mac / Linux (LF)"]], doc.eol);
+      const hasF = mode === "export" && doc.hasFormulas();
+      const formulas = select("Formulas", [["values", "Export the calculated values"], ["formulas", "Keep formulas as text"]], doc.saveFormulasAs ?? "values");
+      const ok = el("button", { class: "btn primary", text: mode === "export" ? "Export…" : "Reopen" });
+      const cancel = el("button", { class: "btn", text: "Cancel" });
+      const box = el("div", { class: "modal prefs", role: "dialog" },
+        el("h3", { text: mode === "export" ? "Export as CSV" : "Reopen CSV" }),
+        delim.row, enc.row,
+        mode === "export" ? eol.row : null,
+        hasF ? formulas.row : null,
+        el("p", { class: "hint", text: mode === "export"
+          ? (doc.book.sheets.length > 1 ? `Exports the "${doc.sheetName}" sheet. ` : "") + "Formatting isn't kept in CSV."
+          : "Reads the file again with these settings." }),
+        el("div", { class: "foot" }, cancel, ok),
+      );
+      const scrim = el("div", { class: "scrim" }, box);
+      const done = (v: Parameters<typeof resolve>[0]) => { scrim.remove(); window.removeEventListener("keydown", onKey, true); this.grid.focus(); resolve(v); };
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(null); }
+        else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); ok.click(); }
+      };
+      ok.addEventListener("click", () => {
+        const e = enc.sel.value;
+        done({
+          delim: delim.sel.value as Delimiter,
+          encoding: (e === "utf-8-bom" ? "utf-8" : e) as Encoding,
+          bom: e === "utf-8-bom" || e === "utf-16le",
+          eol: eol.sel.value as LineEnding,
+          formulas: hasF ? formulas.sel.value as "values" | "formulas" : undefined,
+        });
+      });
+      cancel.addEventListener("click", () => done(null));
+      scrim.addEventListener("pointerdown", (e) => { if (e.target === scrim) done(null); });
+      window.addEventListener("keydown", onKey, true);
+      document.body.append(scrim);
+      ok.focus();
+    });
+  }
+
+  /** Re-read a CSV that came in with the wrong separator or encoding. */
+  private async reopenCsv() {
+    const d = this.active;
+    if (!d || !d.source || isBentoPath(d.source.name)) return;
+    if (d.book.dirty) { toast("Save or undo your changes before reopening the file"); return; }
+    const opts = await this.csvDialog(d, "reopen");
+    if (!opts) return;
+    this.load(d, d.source, { delim: opts.delim, encoding: opts.encoding }).catch((err) => toast(String(err), true));
+  }
+
+  /* ------------------------------- sheets ------------------------------- */
+
+  private showSheet(doc: Doc) {
+    const book = doc.book;
+    const i = this.docs.indexOf(this.active!);
+    book.current = book.sheets.indexOf(doc);
+    if (i >= 0 && this.active?.book === book) this.docs[i] = doc;
+    this.activate(doc);
+  }
+
+  private addSheet() {
+    const d = this.active;
+    if (!d) return;
+    const book = d.book;
+    const sheet = this.makeSheet(book, book.freshName());
+    book.sheets.splice(book.current + 1, 0, sheet);
+    book.structureDirty = true;
+    this.showSheet(sheet);
+  }
+
+  private duplicateSheet(doc: Doc) {
+    const book = doc.book;
+    const copy = this.makeSheet(book, "");
+    sheetFromData(copy, sheetToData(doc));
+    copy.sheetName = book.freshName(`${doc.sheetName} copy`.replace(/\d+$/, "") + " ");
+    copy.remeasureAll();
+    book.sheets.splice(book.sheets.indexOf(doc) + 1, 0, copy);
+    book.structureDirty = true;
+    this.showSheet(copy);
+  }
+
+  private async deleteSheet(doc: Doc) {
+    const book = doc.book;
+    if (book.sheets.length < 2) { toast("A file needs at least one sheet"); return; }
+    if (doc.rows.length) {
+      const ok = await modal(`Delete "${doc.sheetName}"?`, "This removes the sheet and everything on it. You can't undo this.", [
+        { label: "Cancel", value: false },
+        { label: "Delete", value: true, primary: true },
+      ]);
+      if (!ok) return;
+    }
+    const i = book.sheets.indexOf(doc);
+    book.sheets.splice(i, 1);
+    book.structureDirty = true;
+    const next = book.sheets[Math.min(i, book.sheets.length - 1)];
+    if (this.active === doc) this.showSheet(next);
+    else this.render();
+  }
+
+  private moveSheet(doc: Doc, dir: -1 | 1) {
+    const book = doc.book;
+    const i = book.sheets.indexOf(doc), j = i + dir;
+    if (j < 0 || j >= book.sheets.length) return;
+    [book.sheets[i], book.sheets[j]] = [book.sheets[j], book.sheets[i]];
+    book.current = book.sheets.indexOf(this.active!);
+    book.structureDirty = true;
+    this.render();
+  }
+
+  /** Rename in place: the tab turns into a little text box. */
+  private renameSheet(doc: Doc) {
+    const tab = document.querySelector<HTMLElement>(`.sheet-tab[data-sheet="${doc.book.sheets.indexOf(doc)}"]`);
+    if (!tab) return;
+    const input = el("input", { class: "sheet-rename", value: doc.sheetName, spellcheck: "false" });
+    tab.replaceWith(input);
+    input.focus();
+    input.select();
+    let finished = false;
+    const finish = (save: boolean) => {
+      if (finished) return;
+      finished = true;
+      const v = input.value.trim();
+      if (save && v && v !== doc.sheetName) {
+        if (doc.book.sheets.some((s) => s !== doc && s.sheetName.toLowerCase() === v.toLowerCase())) toast(`There's already a sheet called "${v}"`);
+        else { doc.sheetName = v; doc.book.structureDirty = true; }
+      }
+      this.render();
+      this.grid.focus();
+    };
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      // preventDefault matters: focus returns to the grid during this key press,
+      // and the Enter must not carry over into a cell.
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", () => finish(true));
+  }
+
+  private sheetMenu(doc: Doc, x: number, y: number) {
+    const book = doc.book;
+    const i = book.sheets.indexOf(doc);
+    showMenu([
+      { label: "Rename", action: () => this.renameSheet(doc) },
+      { label: "Duplicate", action: () => this.duplicateSheet(doc) },
+      { label: "Move left", disabled: i === 0, action: () => this.moveSheet(doc, -1) },
+      { label: "Move right", disabled: i === book.sheets.length - 1, action: () => this.moveSheet(doc, 1) },
+      "sep",
+      { label: "Delete", danger: true, disabled: book.sheets.length < 2, action: () => this.deleteSheet(doc) },
+    ], x, y - 4, undefined, "up");
+  }
+
+  private renderSheetTabs(box: HTMLElement) {
+    const d = this.active!;
+    const book = d.book;
+    const add = el("button", { class: "sheet-btn", title: "Add sheet" });
+    add.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 3.5v9M3.5 8h9"/></svg>';
+    add.addEventListener("click", () => this.addSheet());
+    const all = el("button", { class: "sheet-btn", title: "All sheets" });
+    all.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 4.5h10M3 8h10M3 11.5h10"/></svg>';
+    all.addEventListener("click", () => {
+      const r = all.getBoundingClientRect();
+      showMenu(book.sheets.map((s) => ({ label: s.sheetName, checked: s === d, action: () => this.showSheet(s) })), r.left, r.top - 4, undefined, "up");
+    });
+    const tabs = el("div", { class: "sheet-tabs" });
+    book.sheets.forEach((s, i) => {
+      const caret = el("span", { class: "caret" });
+      caret.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M5.5 6.75 8 9.25l2.5-2.5"/></svg>';
+      const tab = el("button", { class: "sheet-tab" + (s === d ? " active" : ""), "data-sheet": String(i), title: s.sheetName },
+        el("span", { class: "label", text: s.sheetName }), s === d ? caret : null);
+      tab.addEventListener("click", (e) => {
+        if (s !== d) this.showSheet(s);
+        else if (caret.contains(e.target as Node)) { const r = tab.getBoundingClientRect(); this.sheetMenu(s, r.left, r.top); }
+      });
+      tab.addEventListener("dblclick", () => this.renameSheet(s));
+      tab.addEventListener("contextmenu", (e) => { e.preventDefault(); this.sheetMenu(s, e.clientX, e.clientY); });
+      tabs.append(tab);
+    });
+    box.append(add, all, tabs);
   }
 
   /* -------------------------------- recent -------------------------------- */
@@ -326,7 +522,7 @@ export class App {
     this.renderLoading();
     this.renderStatus();
     const d = this.active;
-    windowControls.setTitle(d ? `${d.name}${d.dirty ? " •" : ""} — Bento` : "Bento");
+    windowControls.setTitle(d ? `${d.name}${d.book.dirty ? " •" : ""} — Bento` : "Bento");
     this.refreshToolbar();
   }
 
@@ -338,7 +534,7 @@ export class App {
         el("span", { class: "dot" }),
         svg('<path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>', 12, "close-glyph"),
       );
-      const tab = el("div", { class: "tab" + (d === this.active ? " active" : "") + (d.dirty ? " dirty" : ""), title: d.path ?? d.name },
+      const tab = el("div", { class: "tab" + (d === this.active ? " active" : "") + (d.book.dirty ? " dirty" : ""), title: d.path ?? d.name },
         el("span", { class: "name", text: d.name }),
         closeBtn,
       );
@@ -396,37 +592,30 @@ export class App {
 
   private renderStatus() {
     const left = $("status-left");
-    const right = $("status-right");
+    const dims = $("status-dims");
     left.textContent = "";
-    right.textContent = "";
+    dims.textContent = "";
     const d = this.active;
-    if (!d || d.loading !== null) return;
-    const total = Math.max(0, d.rows.length - (d.freezeHeader && d.rows.length ? 1 : 0));
-    const rowsText = d.view
-      ? `${formatInt(Math.max(0, d.view.length - (d.freezeHeader ? 1 : 0)))} of ${formatInt(total)} rows`
-      : `${formatInt(total)} ${total === 1 ? "row" : "rows"}`;
-    left.append(el("span", { class: "item", text: `${rowsText} · ${formatInt(d.cols)} ${d.cols === 1 ? "column" : "columns"}` }));
-    const btn = (text: string, title: string, fn: (b: HTMLElement) => void) => {
-      const b = el("button", { class: "item", text, title });
-      b.addEventListener("click", () => fn(b));
-      left.append(el("span", { class: "sep", text: "·" }), b);
-    };
-    btn(encodingLabel(d.encoding, d.bom), "Text encoding (for CSV export)", (b) => this.encodingMenu(b));
-    btn(delimiterLabel(d.delim), "Delimiter (for CSV export)", (b) => this.delimiterMenu(b));
-    btn(d.eol === "\r\n" ? "CRLF" : "LF", "Line endings (for CSV export)", (b) => this.eolMenu(b));
+    if (!d || d.loading !== null) { $("status-stats").textContent = ""; return; }
+    this.renderSheetTabs(left);
     if (d.filters.size) {
-      const b = el("button", { class: "item", text: "Clear filters", title: "Show all rows" });
-      b.style.color = "var(--accent-text)";
+      const b = el("button", { class: "item accent", text: "Clear filters", title: "Show all rows" });
       b.addEventListener("click", () => { d.clearFilters(); this.afterStructure(); });
-      left.append(el("span", { class: "sep", text: "·" }), b);
+      dims.append(b);
     }
+    const header = d.freezeHeader && d.rows.length ? 1 : 0;
+    const total = Math.max(0, d.rows.length - header);
+    const rowsText = d.view
+      ? `${formatInt(Math.max(0, d.view.length - header))} of ${formatInt(total)} rows`
+      : `${formatInt(total)} ${total === 1 ? "row" : "rows"}`;
+    dims.append(el("span", { class: "item", text: `${rowsText} · ${formatInt(d.cols)} ${d.cols === 1 ? "column" : "columns"}` }));
     this.renderStats();
   }
 
   private renderStats() {
     clearTimeout(this.statsTimer);
     this.statsTimer = window.setTimeout(() => {
-      const right = $("status-right");
+      const right = $("status-stats");
       right.textContent = "";
       const d = this.active;
       if (!d || d.loading !== null) return;
@@ -697,6 +886,7 @@ export class App {
       { label: "Save", key: "Ctrl+S", disabled: !d, action: () => this.save() },
       { label: "Save as…", key: "Ctrl+Shift+S", disabled: !d, action: () => this.save(d, true) },
       { label: "Export as CSV…", key: "Ctrl+E", disabled: !d, action: () => this.exportCsv(d) },
+      ...(d?.source && !isBentoPath(d.source.name) ? [{ label: "Reopen CSV with other settings…", disabled: d.book.dirty, action: () => this.reopenCsv() } as MenuItem] : []),
       { label: "Close tab", key: "Ctrl+W", disabled: !d, action: () => d && this.closeDoc(d) },
       "sep",
       { label: "Find", key: "Ctrl+F", disabled: !d, action: () => this.find.open(false) },
@@ -756,50 +946,10 @@ export class App {
       "Ctrl+B / I / U  bold, italic, underline  ·  Alt+Shift+5  strikethrough",
       "Ctrl+Shift+L / E / R  align left, centre, right  ·  Ctrl+\\  clear formatting",
       "Ctrl+S  save (.bento)  ·  Ctrl+E  export CSV  ·  Ctrl+O  open  ·  Ctrl+N  new",
-      "Ctrl+Tab  next tab  ·  Ctrl+W  close tab",
+      "Ctrl+Tab  next file  ·  Ctrl+PgDn / PgUp  next sheet  ·  Ctrl+W  close",
+      "Ctrl+Alt+−  delete selected rows/columns  ·  Ctrl+Shift+F  hide toolbar",
       "Formulas start with =, e.g. =SUM(B2:B100)",
     ].join("\n"), [{ label: "Done", value: true, primary: true }]);
-  }
-
-  private encodingMenu(anchor: HTMLElement) {
-    const d = this.active!;
-    const r = anchor.getBoundingClientRect();
-    const set = (e: Encoding, bom: boolean) => () => { d.encoding = e; d.bom = bom; d.markDirty(); this.render(); };
-    const canReread = !!d.source && !d.dirty && !isBentoPath(d.source.name);
-    const reread = (e: Encoding) => () => this.load(d, d.source!, { encoding: e, delim: d.delim }).catch((err) => toast(String(err), true));
-    showMenu([
-      { heading: "Export CSV as" },
-      { label: "UTF-8", checked: d.encoding === "utf-8" && !d.bom, action: set("utf-8", false) },
-      { label: "UTF-8 with BOM (best for Excel)", checked: d.encoding === "utf-8" && d.bom, action: set("utf-8", true) },
-      { label: "Windows-1252", checked: d.encoding === "windows-1252", action: set("windows-1252", false) },
-      { label: "UTF-16 LE", checked: d.encoding === "utf-16le", action: set("utf-16le", true) },
-      ...(canReread ? ["sep" as const, { heading: "Reopen as" } as MenuItem,
-        { label: "UTF-8", action: reread("utf-8") }, { label: "Windows-1252", action: reread("windows-1252") }] : []),
-    ], r.left, r.top - 4);
-  }
-
-  private delimiterMenu(anchor: HTMLElement) {
-    const d = this.active!;
-    const r = anchor.getBoundingClientRect();
-    const all: Delimiter[] = [",", ";", "\t", "|"];
-    const canReread = !!d.source && !d.dirty && !isBentoPath(d.source.name);
-    showMenu([
-      { heading: "Export CSV with" },
-      ...all.map((x) => ({ label: delimiterLabel(x), checked: d.delim === x, action: () => { d.delim = x; d.markDirty(); this.render(); } })),
-      ...(canReread ? ["sep" as const, { heading: "Re-read file split by" } as MenuItem,
-        ...all.map((x) => ({ label: delimiterLabel(x), action: () => this.load(d, d.source!, { delim: x, encoding: d.encoding }).catch((err) => toast(String(err), true)) }))] : []),
-    ], r.left, r.top - 4);
-  }
-
-  private eolMenu(anchor: HTMLElement) {
-    const d = this.active!;
-    const r = anchor.getBoundingClientRect();
-    const set = (e: LineEnding) => () => { d.eol = e; d.markDirty(); this.render(); };
-    showMenu([
-      { heading: "Line endings" },
-      { label: "Windows (CRLF)", checked: d.eol === "\r\n", action: set("\r\n") },
-      { label: "Unix (LF)", checked: d.eol === "\n", action: set("\n") },
-    ], r.left, r.top - 4);
   }
 
   /** Data rows covered by the selection (filter-aware). */
@@ -919,7 +1069,19 @@ export class App {
 
   /* ------------------------------- bindings ------------------------------- */
 
+  /** Fold the toolbar away (and back). Remembered between launches. */
+  private setToolbar(show: boolean) {
+    localStorage.setItem("bento.toolbar", show ? "shown" : "hidden");
+    document.getElementById("app")!.classList.toggle("toolbar-hidden", !show);
+    const b = $("toolbar-toggle");
+    b.title = show ? "Hide the toolbar (Ctrl+Shift+F)" : "Show the toolbar (Ctrl+Shift+F)";
+    b.classList.toggle("flipped", !show);
+  }
+
   private bindChrome() {
+    this.setToolbar(localStorage.getItem("bento.toolbar") !== "hidden");
+    $("toolbar-toggle").addEventListener("pointerdown", (e) => e.preventDefault());
+    $("toolbar-toggle").addEventListener("click", () => this.setToolbar(document.getElementById("app")!.classList.contains("toolbar-hidden")));
     $("menu-btn").addEventListener("click", () => this.appMenu());
     $("new-tab").addEventListener("click", () => this.newDoc());
     document.querySelectorAll<HTMLElement>("#theme-toggle button").forEach((b) => {
@@ -999,6 +1161,7 @@ export class App {
       }
       else if (d && ctrl && e.key === "\\") { e.preventDefault(); this.applyFormat(() => ({}), "Clear formatting"); }
       else if (ctrl && k === "w") { e.preventDefault(); if (d) this.closeDoc(d); }
+      else if (ctrl && e.shiftKey && k === "f") { e.preventDefault(); this.setToolbar(document.getElementById("app")!.classList.contains("toolbar-hidden")); }
       else if (ctrl && k === "f") { e.preventDefault(); if (d) this.find.open(false); }
       else if (ctrl && k === "h") { e.preventDefault(); if (d) this.find.open(true); }
       else if (ctrl && e.key === "Tab") {
@@ -1009,9 +1172,23 @@ export class App {
         }
       }
       else if (ctrl && (e.key === "=" || e.key === "+")) { e.preventDefault(); this.stepZoom(1); }
-      else if (ctrl && e.key === "-") { e.preventDefault(); this.stepZoom(-1); }
+      else if (ctrl && !e.altKey && e.key === "-") { e.preventDefault(); this.stepZoom(-1); }
       else if (ctrl && e.key === "0") { e.preventDefault(); this.setZoom(1); }
       else if (e.key === "F1") { e.preventDefault(); this.shortcuts(); }
+      else if (ctrl && (e.key === "PageDown" || e.key === "PageUp") && d) {
+        e.preventDefault();
+        const sh = d.book.sheets, i = sh.indexOf(d);
+        const next = sh[(i + (e.key === "PageDown" ? 1 : -1) + sh.length) % sh.length];
+        if (next !== d) this.showSheet(next);
+      }
+      else if (ctrl && e.altKey && (e.key === "-" || e.code === "Minus") && d) {
+        // Delete selected whole rows or columns (Sheets: Ctrl+Alt+-).
+        e.preventDefault();
+        const s = selRect(d.sel);
+        if (this.grid.isWholeRows(s)) { d.deleteRows(this.selectedDataRows()); this.afterStructure(); }
+        else if (this.grid.isWholeCols(s)) { d.deleteCols(s.c0, s.c1 - s.c0 + 1); this.afterStructure(); }
+        else toast("Select whole rows or columns to delete them");
+      }
       else if (ctrl && e.key === ",") { e.preventDefault(); this.preferences(); }
       else if (e.key === "Escape" && this.find.isOpen && document.activeElement === this.grid.sink) { this.find.close(); }
       else if (d && document.activeElement === document.body && !ctrl && !e.altKey) {
@@ -1036,7 +1213,7 @@ export class App {
   }
 }
 
-const LOGO = `<rect x="2" y="2" width="20" height="20" rx="5" fill="var(--accent)"/><rect x="5.2" y="5.2" width="6.2" height="13.6" rx="1.6" fill="var(--on-accent)"/><rect x="12.6" y="5.2" width="6.2" height="6.2" rx="1.6" fill="var(--on-accent)"/><rect x="12.6" y="12.6" width="6.2" height="6.2" rx="1.6" fill="var(--on-accent)" opacity=".55"/>`;
+const LOGO = `<rect x="2" y="2" width="20" height="20" rx="5" fill="#d97757"/><rect x="5.2" y="5.2" width="6.2" height="13.6" rx="1.6" fill="#fbf9f4"/><rect x="12.6" y="5.2" width="6.2" height="6.2" rx="1.6" fill="#fbf9f4"/><rect x="12.6" y="12.6" width="6.2" height="6.2" rx="1.6" fill="#fbf9f4" opacity=".55"/>`;
 
 function svg(inner: string, size: number, cls = ""): SVGElement {
   const vb = size === 12 ? "0 0 12 12" : "0 0 24 24";

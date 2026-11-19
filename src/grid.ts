@@ -92,7 +92,7 @@ export class Grid {
   private get font() { return `${13 * this.zoom}px ${FONT_STACK}`; }
   private get fontHead() { return `${12 * this.zoom}px ${FONT_STACK}`; }
   /** Thickness of the freeze bars / lines. */
-  private get freezeBar() { return this.S(Math.max(2, Math.round(2 * this.zoom))); }
+  private get freezeBar() { return this.S(Math.max(3, Math.round(3 * this.zoom))); }
   private get fontHeadBold() { return `600 ${12 * this.zoom}px ${FONT_STACK}`; }
   /** On-screen width of a column. */
   private cw(c: number): number { return this.S(this.doc!.width(c) * this.zoom); }
@@ -1204,11 +1204,13 @@ export class Grid {
   /** Is the pointer on one of the freeze handles (corner bars or freeze lines)? */
   private freezeHit(x: number, y: number): "freezeRows" | "freezeCols" | null {
     const rhw = this.rowHeaderWidth();
+    // With nothing frozen, the handle is the whole bottom edge of the letter row…
     const onRows = this.fb === 0
-      ? x < rhw && y >= this.hh - 6 && y <= this.hh + 2
+      ? y >= this.hh - 5 && y <= this.hh + 1 && x >= 0
       : y >= this.bodyTop - this.freezeBar - 2 && y <= this.bodyTop + 2 && y > this.hh;
+    // …and the whole right edge of the row-number column.
     const onCols = this.fc === 0
-      ? y < this.hh && x >= rhw - 6 && x <= rhw + 2
+      ? x >= rhw - 5 && x <= rhw + 1 && y >= 0
       : x >= this.bodyLeft - this.freezeBar - 2 && x <= this.bodyLeft + 2 && y >= this.hh;
     if (onRows && onCols) return Math.abs(y - this.hh) < Math.abs(x - rhw) ? "freezeRows" : "freezeCols";
     return onRows ? "freezeRows" : onCols ? "freezeCols" : null;
