@@ -12,7 +12,7 @@ export function openFilter(doc: Doc, col: number, x: number, y: number, onApply:
 
   // Count each distinct value in the column (below the header row).
   const counts = new Map<string, number>();
-  const start = doc.freezeHeader ? 1 : 0;
+  const start = doc.frozenRows;
   for (let r = start; r < doc.rows.length; r++) {
     const v = doc.display(r, col);
     counts.set(v, (counts.get(v) ?? 0) + 1);

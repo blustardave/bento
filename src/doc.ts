@@ -60,7 +60,11 @@ export class Doc {
 
   widths = new Map<number, number>();
   hidden = new Set<number>();
-  freezeHeader = true;
+  /** Rows / columns pinned at the top / left. Row 0 is treated as the header when rows are frozen. */
+  frozenRows = 1;
+  frozenCols = 0;
+  get freezeHeader(): boolean { return this.frozenRows > 0; }
+  set freezeHeader(v: boolean) { this.frozenRows = v ? Math.max(1, this.frozenRows) : 0; }
 
   /** Per-column sets of values to hide. */
   filters = new Map<number, Set<string>>();
@@ -590,7 +594,7 @@ export class Doc {
   /** Sort rows by a column. Numbers sort numerically, blanks always last. */
   /** Returns false (and does nothing) if merged cells span rows in the sorted area. */
   sortBy(col: number, desc: boolean): boolean {
-    const start = this.freezeHeader ? 1 : 0;
+    const start = this.frozenRows;
     if (this.rows.length - start < 2) return true;
     if (this.merges.some((m) => m.r1 >= start && m.r1 > m.r0)) return false;
     let before: string[][] = [];
@@ -632,6 +636,15 @@ export class Doc {
     return true;
   }
 
+  /** Freeze the first `rows` rows and `cols` columns. */
+  setFrozen(rows: number, cols: number) {
+    if (rows === this.frozenRows && cols === this.frozenCols) return;
+    this.frozenRows = Math.max(0, rows);
+    this.frozenCols = Math.max(0, cols);
+    this.refreshView();
+    this.markDirty();
+  }
+
   /* ----------------------------- filters ----------------------------- */
 
   setFilter(col: number, hiddenValues: Set<string> | null) {
@@ -650,7 +663,7 @@ export class Doc {
   refreshView() {
     if (!this.filters.size) { this.view = null; return; }
     const out: number[] = [];
-    const start = this.freezeHeader ? 1 : 0;
+    const start = this.frozenRows;
     for (let r = 0; r < start && r < this.rows.length; r++) out.push(r);
     const fs = [...this.filters];
     outer: for (let r = start; r < this.rows.length; r++) {

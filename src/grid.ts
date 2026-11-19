@@ -1,6 +1,7 @@
 import { fromTSV, toTSV } from "./csv";
 import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, selRect } from "./doc";
 import { offsetFormula } from "./formula";
+import { fillValues } from "./fill";
 import { DEFAULT_FONT, DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
 import { clamp, colName, parseNum } from "./util";
 
@@ -35,7 +36,10 @@ type Drag =
   | { kind: "cells" }
   | { kind: "cols" }
   | { kind: "rows" }
-  | { kind: "resize"; col: number; startX: number; startW: number };
+  | { kind: "resize"; col: number; startX: number; startW: number }
+  | { kind: "fill"; src: Rect }
+  | { kind: "freezeRows" }
+  | { kind: "freezeCols" };
 
 interface Editing { r: number; c: number; mode: "replace" | "edit" }
 
@@ -65,6 +69,11 @@ export class Grid {
   private raf = 0;
   private settingScroll = false;
   editing: Editing | null = null;
+  /** Fill-handle drag: the range it would fill to. */
+  private fillTarget: Rect | null = null;
+  /** Freeze drag: how many rows/columns would be frozen. */
+  private freezePreview: number | null = null;
+  private hoverFreeze: "freezeRows" | "freezeCols" | null = null;
   private editorWraps = false;
   /** When set, cells whose text matches are highlighted (find). */
   matcher: ((s: string) => boolean) | null = null;
@@ -172,13 +181,15 @@ export class Grid {
   visibleMerges(): Rect[] {
     const d = this.doc;
     if (!d || !d.merges.length) return [];
-    const key = `${d.id}:${d.version}:${d.merges.length}`;
+    const key = `${d.id}:${d.version}:${d.merges.length}:${this.fb}:${this.fc}`;
     if (this.mergeCache.key === key) return this.mergeCache.list;
     const list: Rect[] = [];
     for (const m of d.merges) {
       const r0 = d.displayRow(m.r0), r1 = d.displayRow(m.r1);
       if (r0 < 0 || r1 < 0 || r1 - r0 !== m.r1 - m.r0) continue;
-      if (d.freezeHeader && r0 === 0 && r1 > 0) continue; // can't span the frozen row
+      // Merges can't straddle the frozen edge.
+      if (r0 < this.fb && r1 >= this.fb) continue;
+      if (m.c0 < this.fc && m.c1 >= this.fc) continue;
       list.push({ r0, c0: m.c0, r1, c1: m.c1 });
     }
     this.mergeCache = { key, list };
@@ -236,8 +247,24 @@ export class Grid {
 
   /* ----------------------------- geometry ----------------------------- */
 
-  private get fb(): number { return this.doc?.freezeHeader ? 1 : 0; }
-  private get bodyTop(): number { return this.hh + (this.fb ? this.rowH(0) : 0); }
+  /** Frozen rows / columns actually shown (capped so the scrolling area never disappears). */
+  private fbEff = 0;
+  private fcEff = 0;
+  private get fb(): number { return this.fbEff; }
+  private get fc(): number { return this.fcEff; }
+  private get bodyTop(): number { return this.hh + this.yOf(this.fb); }
+  private get frozenW(): number { return this.xs[Math.min(this.fc, this.ncols)] ?? 0; }
+  private get bodyLeft(): number { return this.rowHeaderWidth() + this.frozenW; }
+
+  private updateFrozen() {
+    const d = this.doc!;
+    let k = Math.min(d.frozenRows, d.displayRows() - 1);
+    while (k > 0 && this.hh + this.yOf(k) > this.scroller.clientHeight - this.rh * 2) k--;
+    this.fbEff = Math.max(0, k);
+    let j = Math.min(d.frozenCols, this.ncols - 1);
+    while (j > 0 && this.rowHeaderWidth() + this.xs[j] > this.scroller.clientWidth - 80 * this.zoom) j--;
+    this.fcEff = Math.max(0, j);
+  }
 
   /** Height of a display row on screen. */
   rowH(r: number): number {
@@ -255,7 +282,7 @@ export class Grid {
     const d = this.doc;
     if (!d || !d.tallRows) { this.ys = null; this.ysKey = ""; return; }
     const n = d.displayRows();
-    const key = `${d.id}:${d.version}:${this.zoom}:${n}:${d.freezeHeader}`;
+    const key = `${d.id}:${d.version}:${this.zoom}:${n}`;
     if (key === this.ysKey) return;
     this.ysKey = key;
     const ys = this.ys && this.ys.length === n + 1 ? this.ys : new Float64Array(n + 1);
@@ -303,6 +330,7 @@ export class Grid {
     this.xs[n] = x;
     this.ncols = n;
     this.buildYs();
+    this.updateFrozen();
     const w = this.rowHeaderWidth() + x + 60;
     const h = this.bodyTop + Math.min(this.contentH(), MAX_PX);
     if (this.spacer.style.width !== w + "px") this.spacer.style.width = w + "px";
@@ -336,11 +364,12 @@ export class Grid {
   private get sy(): number { return this.doc?.scrollY ?? 0; }
 
   rowTop(r: number): number {
-    return r < this.fb ? this.hh : this.bodyTop + this.yOf(r) - this.yOf(this.fb) - this.sy;
+    return r < this.fb ? this.hh + this.yOf(r) : this.bodyTop + this.yOf(r) - this.yOf(this.fb) - this.sy;
   }
 
   colLeft(c: number): number {
-    return this.rowHeaderWidth() + this.xs[Math.min(c, this.ncols)] - this.sx;
+    const x = this.rowHeaderWidth() + this.xs[Math.min(c, this.ncols)];
+    return c < this.fc ? x : x - this.sx;
   }
 
   private colAtContent(cx: number): number {
@@ -357,11 +386,17 @@ export class Grid {
   }
 
   colAt(x: number): number {
-    return this.colAtContent(x - this.rowHeaderWidth() + this.sx);
+    const rhw = this.rowHeaderWidth();
+    if (this.fc && x < this.bodyLeft) return Math.min(this.fc - 1, this.colAtContent(x - rhw));
+    return Math.max(this.fc, this.colAtContent(x - rhw + this.sx));
   }
 
   rowAt(y: number): number {
-    if (this.fb && y >= this.hh && y < this.bodyTop) return 0;
+    if (this.fb && y >= this.hh && y < this.bodyTop) {
+      let r = 0;
+      while (r + 1 < this.fb && this.hh + this.yOf(r + 1) <= y) r++;
+      return r;
+    }
     return this.rowAtBody(y - this.bodyTop + this.sy);
   }
 
@@ -376,8 +411,8 @@ export class Grid {
     if (y >= this.hh || !this.doc) return -1;
     const rhw = this.rowHeaderWidth();
     for (let c = 0; c < this.ncols; c++) {
-      const right = rhw + this.xs[c + 1] - this.sx;
-      if (right < rhw) continue;
+      const right = this.colLeft(c) + this.cw(c);
+      if (right < rhw || (c >= this.fc && right <= this.bodyLeft + 2)) continue;
       if (right > this.w + 10) break;
       if (Math.abs(x - right) <= 4 && this.cw(c) > 0) return c;
     }
@@ -387,13 +422,15 @@ export class Grid {
   scrollIntoView(r: number, c: number) {
     const d = this.doc;
     if (!d) return;
-    const viewW = this.scroller.clientWidth - this.rowHeaderWidth();
+    const viewW = this.scroller.clientWidth - this.bodyLeft;
     const viewH = this.scroller.clientHeight - this.bodyTop;
     let { scrollX: x, scrollY: y } = d;
-    const left = this.xs[Math.min(c, this.ncols)];
-    const right = this.xs[Math.min(c + 1, this.ncols)];
-    if (left < x) x = left;
-    else if (right > x + viewW) x = Math.max(0, right - viewW);
+    if (c >= this.fc) {
+      const left = this.xs[Math.min(c, this.ncols)] - this.frozenW;
+      const right = this.xs[Math.min(c + 1, this.ncols)] - this.frozenW;
+      if (left < x) x = left;
+      else if (right > x + viewW) x = Math.max(0, right - viewW);
+    }
     if (r >= this.fb) {
       const top = this.yOf(r) - this.yOf(this.fb);
       const h = this.rowH(r);
@@ -519,46 +556,57 @@ export class Grid {
     if (!d) return;
 
     const rhw = this.rowHeaderWidth();
-    const fb = this.fb;
-    const bodyTop = this.bodyTop;
-    const c0 = this.colAtContent(this.sx);
-    const c1 = this.colAtContent(this.sx + w - rhw);
+    const fb = this.fb, fc = this.fc;
+    const bodyTop = this.bodyTop, bodyLeft = this.bodyLeft;
+    const c0 = Math.max(fc, this.colAtContent(this.frozenW + this.sx));
+    const c1 = Math.max(c0, this.colAtContent(this.sx + w - rhw));
     const r0 = this.rowAtBody(this.sy);
     const r1 = this.rowAtBody(this.sy + h - bodyTop);
     const rect = selRect(d.sel);
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(rhw, bodyTop, w - rhw, h - bodyTop);
-    ctx.clip();
-    this.drawCells(r0, r1, c0, c1, rect, false);
-    ctx.restore();
-
-    if (fb) {
+    const pass = (x: number, y: number, pw: number, ph: number, ra: number, rb: number, ca: number, cb: number, frozenRows: boolean) => {
+      if (pw <= 0 || ph <= 0 || rb < ra || cb < ca) return;
       ctx.save();
       ctx.beginPath();
-      ctx.rect(rhw, this.hh, w - rhw, this.rowH(0));
+      ctx.rect(x, y, pw, ph);
       ctx.clip();
-      ctx.fillStyle = k.surface;
-      ctx.fillRect(rhw, this.hh, w - rhw, this.rowH(0));
-      this.drawCells(0, 0, c0, c1, rect, true);
+      if (frozenRows) { ctx.fillStyle = k.surface; ctx.fillRect(x, y, pw, ph); }
+      this.drawCells(ra, rb, ca, cb, rect, frozenRows);
       ctx.restore();
-      ctx.fillStyle = k.lineStrong;
-      ctx.fillRect(0, bodyTop - 1, w, 1);
-    }
+    };
+    pass(bodyLeft, bodyTop, w - bodyLeft, h - bodyTop, r0, r1, c0, c1, false);
+    if (fc) pass(rhw, bodyTop, this.frozenW, h - bodyTop, r0, r1, 0, fc - 1, false);
+    if (fb) pass(bodyLeft, this.hh, w - bodyLeft, bodyTop - this.hh, 0, fb - 1, c0, c1, true);
+    if (fb && fc) pass(rhw, this.hh, this.frozenW, bodyTop - this.hh, 0, fb - 1, 0, fc - 1, true);
 
-    this.drawColHeaders(c0, c1, rect, rhw);
+    this.drawFillHandle(rect);
+    this.drawFillPreview();
+
+    this.drawColHeaders(c0, c1, rect, bodyLeft, w);
+    if (fc) this.drawColHeaders(0, fc - 1, rect, rhw, bodyLeft);
     this.drawRowHeaders(r0, r1, rect, rhw);
 
-    ctx.fillStyle = k.surface;
-    ctx.fillRect(0, 0, rhw, this.hh);
+    // Freeze lines.
+    const drag = this.drag;
+    const hot = (kind: "freezeRows" | "freezeCols") => drag?.kind === kind || this.hoverFreeze === kind;
     ctx.fillStyle = k.lineStrong;
     ctx.fillRect(0, this.hh - 1, w, 1);
     ctx.fillRect(rhw - 1, 0, 1, h);
+    if (fb) { ctx.fillStyle = hot("freezeRows") ? k.accent : k.lineStrong; ctx.fillRect(0, bodyTop - 2, w, 2); }
+    if (fc) { ctx.fillStyle = hot("freezeCols") ? k.accent : k.lineStrong; ctx.fillRect(bodyLeft - 2, 0, 2, h); }
+
+    // Corner, with the two freeze handles on its bottom and right edges.
+    ctx.fillStyle = k.surface;
+    ctx.fillRect(0, 0, rhw - 1, this.hh - 1);
+    const bar = Math.max(3, Math.round(3 * this.zoom));
+    ctx.fillStyle = hot("freezeRows") ? k.accent : k.muted;
+    ctx.fillRect(0, this.hh - bar, rhw, bar);
+    ctx.fillStyle = hot("freezeCols") ? k.accent : k.muted;
+    ctx.fillRect(rhw - bar, 0, bar, this.hh);
     if (d.filters.size) {
       ctx.fillStyle = k.accent;
-      this.funnel(rhw / 2 - 5, this.hh / 2 - 5);
+      this.funnel(rhw / 2 - 6, this.hh / 2 - 6);
     }
+    this.drawFreezePreview();
   }
 
   private drawCells(r0: number, r1: number, c0: number, c1: number, sel: Rect, frozen: boolean) {
@@ -639,12 +687,13 @@ export class Grid {
       const st = d.rowStyleArray(dr);
       const s = st && st[c] ? d.styles[st[c]] : NO_STYLE;
       const { text: full, err, numeric } = this.cellText(dr, c, raw, s);
-      const ha = s.ha ?? (numeric && !frozen ? "r" : "l");
+      const header = r === 0 && d.frozenRows > 0;
+      const ha = s.ha ?? (numeric && !header ? "r" : "l");
       const va = s.va ?? "b";
       const wrap = s.wrap ?? "overflow";
       const px = ptToPx(s.size ?? DEFAULT_SIZE) * this.zoom;
       const lh = Math.round(px * 1.35);
-      ctx.font = this.cellFont(s, frozen);
+      ctx.font = this.cellFont(s, header);
       const { x, y, w: cw, h: rh } = box;
       const color = err ? k.error : resolveColor(s.color, this.theme) ?? k.text;
 
@@ -731,7 +780,7 @@ export class Grid {
       const x = this.colLeft(c) + cw - 1;
       if (!skipV.size && !merges.length) {
         const top = frozen ? this.hh : this.bodyTop;
-        const bottom = frozen ? this.hh + this.rowH(0) : Math.min(this.h, this.rowTop(r1) + this.rowH(r1));
+        const bottom = frozen ? this.bodyTop : Math.min(this.h, this.rowTop(r1) + this.rowH(r1));
         ctx.fillRect(x, top, 1, bottom - top);
         continue;
       }
@@ -765,16 +814,16 @@ export class Grid {
     if (s.s) ctx.fillRect(lx, Math.round(ty), tw, th);
   }
 
-  private drawColHeaders(c0: number, c1: number, sel: Rect, rhw: number) {
-    const { ctx, colors: k, w } = this;
+  private drawColHeaders(c0: number, c1: number, sel: Rect, x0: number, x1: number) {
+    const { ctx, colors: k } = this;
     const d = this.doc!;
     const hh = this.hh;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(rhw, 0, w - rhw, hh);
+    ctx.rect(x0, 0, x1 - x0, hh);
     ctx.clip();
     ctx.fillStyle = k.surface;
-    ctx.fillRect(rhw, 0, w - rhw, hh);
+    ctx.fillRect(x0, 0, x1 - x0, hh);
     const whole = sel.r0 === 0 && sel.r1 >= this.lastRow();
     ctx.font = this.fontHead;
     ctx.textBaseline = "middle";
@@ -848,8 +897,8 @@ export class Grid {
     ctx.restore();
     if (this.fb) {
       ctx.fillStyle = k.surface;
-      ctx.fillRect(0, this.hh, rhw, this.rowH(0));
-      draw(0);
+      ctx.fillRect(0, this.hh, rhw, this.bodyTop - this.hh);
+      for (let r = 0; r < this.fb; r++) draw(r);
     }
   }
 
@@ -924,6 +973,201 @@ export class Grid {
     widths.forEach((m, c) => d.widths.set(c, clamp(Math.ceil(m + BASE_PAD * 2 + 6), 64, 320)));
   }
 
+  /* --------------------------- fill handle --------------------------- */
+
+  /** Where the fill handle sits (bottom-right of the selection), or null if hidden. */
+  private fillHandlePos(): { x: number; y: number } | null {
+    const d = this.doc;
+    if (!d || this.editing || d.loading !== null || this.drag?.kind === "fill") return null;
+    const s = selRect(d.sel);
+    const b = this.cellBox(s.r1, s.c1);
+    const x = b.x + b.w - 1, y = b.y + b.h - 1;
+    const minX = s.c1 >= this.fc ? this.bodyLeft : this.rowHeaderWidth();
+    const minY = s.r1 >= this.fb ? this.bodyTop : this.hh;
+    if (x < minX || y < minY || x > this.w || y > this.h) return null;
+    return { x, y };
+  }
+
+  private nearFillHandle(x: number, y: number): boolean {
+    const p = this.fillHandlePos();
+    return !!p && Math.hypot(x - p.x, y - p.y) <= 7;
+  }
+
+  private drawFillHandle(_sel: Rect) {
+    const p = this.fillHandlePos();
+    if (!p) return;
+    const ctx = this.ctx;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = this.colors.accent;
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = this.colors.bg;
+    ctx.stroke();
+  }
+
+  private drawFillPreview() {
+    const t = this.fillTarget;
+    if (!t) return;
+    const ctx = this.ctx;
+    const x0 = this.colLeft(t.c0), x1 = this.colLeft(t.c1) + this.cw(t.c1);
+    const y0 = this.rowTop(t.r0), y1 = this.rowTop(t.r1) + this.rowH(t.r1);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(this.rowHeaderWidth(), this.hh, this.w, this.h);
+    ctx.clip();
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = this.colors.muted;
+    ctx.strokeRect(x0 - 0.5, y0 - 0.5, x1 - x0, y1 - y0);
+    ctx.restore();
+  }
+
+  /** Work out the fill range from the pointer, like Sheets: pick the axis you've dragged further along. */
+  private updateFillTarget(src: Rect, x: number, y: number) {
+    const sx0 = this.colLeft(src.c0), sx1 = this.colLeft(src.c1) + this.cw(src.c1);
+    const sy0 = this.rowTop(src.r0), sy1 = this.rowTop(src.r1) + this.rowH(src.r1);
+    const dy = y > sy1 ? y - sy1 : y < sy0 ? sy0 - y : 0;
+    const dx = x > sx1 ? x - sx1 : x < sx0 ? sx0 - x : 0;
+    if (!dx && !dy) { this.fillTarget = null; return; }
+    const r = this.rowAt(clamp(y, this.hh, this.h - 1));
+    const c = this.colAt(clamp(x, this.rowHeaderWidth(), this.w - 1));
+    const lastRow = this.doc!.view ? this.doc!.view.length - 1 : this.doc!.displayRows() - 1;
+    if (dy >= dx) {
+      if (r > src.r1) this.fillTarget = { ...src, r1: Math.min(r, lastRow) };
+      else if (r < src.r0) this.fillTarget = { ...src, r0: r };
+      else this.fillTarget = null;
+    } else {
+      if (c > src.c1) this.fillTarget = { ...src, c1: c };
+      else if (c < src.c0) this.fillTarget = { ...src, c0: c };
+      else this.fillTarget = null;
+    }
+  }
+
+  /** Fill from `src` out to `tgt` (which contains it). */
+  fill(src: Rect, tgt: Rect, alt: boolean) {
+    const d = this.doc;
+    if (!d) return;
+    const vertical = tgt.r0 !== src.r0 || tgt.r1 !== src.r1;
+    const backward = vertical ? tgt.r0 < src.r0 : tgt.c0 < src.c0;
+    const count = vertical ? (tgt.r1 - tgt.r0) - (src.r1 - src.r0) : (tgt.c1 - tgt.c0) - (src.c1 - src.c0);
+    if (count <= 0) return;
+    const cells: CellSet[] = [];
+    // One "line" per column (vertical fill) or row (horizontal fill).
+    const lines = vertical ? src.c1 - src.c0 + 1 : src.r1 - src.r0 + 1;
+    const n = vertical ? src.r1 - src.r0 + 1 : src.c1 - src.c0 + 1;
+    for (let li = 0; li < lines; li++) {
+      const srcCells: { r: number; c: number }[] = [];
+      for (let i = 0; i < n; i++) {
+        srcCells.push(vertical ? { r: d.dataRow(src.r0 + i), c: src.c0 + li } : { r: d.dataRow(src.r0 + li), c: src.c0 + i });
+      }
+      const raws = srcCells.map((p) => d.raw(p.r, p.c));
+      const hasFormula = raws.some((v) => v.charCodeAt(0) === 61);
+      const values = hasFormula ? null : fillValues(raws, count, backward, alt);
+      for (let k = 0; k < count; k++) {
+        const pos = backward ? -(k + 1) : n + k; // index along the line
+        const si = ((pos % n) + n) % n;
+        const from = srcCells[si];
+        let tr: number, tc: number;
+        if (vertical) {
+          const disp = backward ? src.r0 - 1 - k : src.r1 + 1 + k;
+          if (disp < 0 || (d.view && disp >= d.view.length)) continue;
+          tr = d.dataRow(disp); tc = src.c0 + li;
+        } else {
+          const col = backward ? src.c0 - 1 - k : src.c1 + 1 + k;
+          if (col < 0) continue;
+          tr = d.dataRow(src.r0 + li); tc = col;
+        }
+        const v = values ? values[k] : offsetFormula(raws[si], tr - from.r, tc - from.c);
+        cells.push({ r: tr, c: tc, v, style: d.styleId(from.r, from.c) });
+      }
+    }
+    const all = { ...tgt };
+    d.setCells(cells, "Fill");
+    this.select(backward ? { ar: all.r0, ac: all.c0, fr: all.r1, fc: all.c1 } : { ar: src.r0, ac: src.c0, fr: all.r1, fc: all.c1 }, false);
+    this.hooks.onChange();
+  }
+
+  /** Double-clicking the handle fills down as far as the neighbouring column has data. */
+  private fillDownToNeighbour() {
+    const d = this.doc;
+    if (!d) return;
+    const s = selRect(d.sel);
+    const last = d.view ? d.view.length - 1 : d.rows.length - 1;
+    const filled = (r: number, c: number) => c >= 0 && r <= last && d.raw(d.dataRow(r), c) !== "";
+    let end = s.r1;
+    for (const c of [s.c0 - 1, s.c1 + 1]) {
+      let r = s.r1;
+      while (filled(r + 1, c)) r++;
+      if (r > end) { end = r; break; }
+    }
+    if (end > s.r1) this.fill(s, { ...s, r1: end }, false);
+  }
+
+  /* ------------------------------ freezing ------------------------------ */
+
+  /** Is the pointer on one of the freeze handles (corner bars or freeze lines)? */
+  private freezeHit(x: number, y: number): "freezeRows" | "freezeCols" | null {
+    const rhw = this.rowHeaderWidth();
+    const onRows = this.fb === 0
+      ? x < rhw && y >= this.hh - 6 && y <= this.hh + 2
+      : Math.abs(y - (this.bodyTop - 1)) <= 3 && y > this.hh;
+    const onCols = this.fc === 0
+      ? y < this.hh && x >= rhw - 6 && x <= rhw + 2
+      : Math.abs(x - (this.bodyLeft - 1)) <= 3 && y >= this.hh;
+    if (onRows && onCols) return Math.abs(y - this.hh) < Math.abs(x - rhw) ? "freezeRows" : "freezeCols";
+    return onRows ? "freezeRows" : onCols ? "freezeCols" : null;
+  }
+
+  /** Snap a pointer position to the nearest row/column boundary that keeps the grid usable. */
+  private freezeCountAt(kind: "freezeRows" | "freezeCols", x: number, y: number): number {
+    const d = this.doc!;
+    if (kind === "freezeRows") {
+      const maxY = this.scroller.clientHeight - this.rh * 2;
+      let best = 0, bestD = Infinity;
+      for (let k = 0; k < d.displayRows(); k++) {
+        const pos = this.hh + this.yOf(k);
+        if (pos > maxY) break;
+        const dist = Math.abs(pos - y);
+        if (dist < bestD) { best = k; bestD = dist; }
+      }
+      return best;
+    }
+    const rhw = this.rowHeaderWidth();
+    const maxX = this.scroller.clientWidth - 80 * this.zoom;
+    let best = 0, bestD = Infinity;
+    for (let k = 0; k < this.ncols; k++) {
+      const pos = rhw + this.xs[k];
+      if (pos > maxX) break;
+      const dist = Math.abs(pos - x);
+      if (dist < bestD) { best = k; bestD = dist; }
+    }
+    return best;
+  }
+
+  private drawFreezePreview() {
+    const drag = this.drag;
+    if (!drag || (drag.kind !== "freezeRows" && drag.kind !== "freezeCols") || this.freezePreview === null) return;
+    const ctx = this.ctx;
+    const k = this.colors;
+    const { x, y } = this.pointer;
+    ctx.save();
+    if (drag.kind === "freezeRows") {
+      const pos = this.hh + this.yOf(this.freezePreview);
+      ctx.fillStyle = k.accent;
+      ctx.fillRect(0, pos - 2, this.w, 3);
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(0, clamp(y, this.hh, this.h) - 2, this.w, 4);
+    } else {
+      const pos = this.rowHeaderWidth() + this.xs[this.freezePreview];
+      ctx.fillStyle = k.accent;
+      ctx.fillRect(pos - 2, 0, 3, this.h);
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(clamp(x, this.rowHeaderWidth(), this.w) - 2, 0, 4, this.h);
+    }
+    ctx.restore();
+  }
+
   /* ------------------------------ editing ------------------------------ */
 
   startEdit(mode: "replace" | "edit", initial?: string, focusEditor = true) {
@@ -993,7 +1237,7 @@ export class Grid {
     const d = this.doc;
     if (!e || !d) return;
     const { x, y, w: cw, h: ch } = this.cellBox(e.r, e.c);
-    const offscreen = (e.r >= this.fb && y + ch < this.bodyTop + 4) || y > this.h || x + cw < this.rowHeaderWidth() || x > this.w;
+    const offscreen = (e.r >= this.fb && y + ch < this.bodyTop + 4) || y > this.h || (e.c >= this.fc && x + cw < this.bodyLeft + 4) || x > this.w;
     this.editor.style.visibility = offscreen ? "hidden" : "visible";
     this.ctx.font = this.editor.style.font || this.font;
     const lh = parseFloat(this.editor.style.lineHeight) || 18;
@@ -1294,6 +1538,28 @@ export class Grid {
         return;
       }
       if (e.button !== 0) return;
+      if (this.nearFillHandle(x, y)) {
+        this.drag = { kind: "fill", src: selRect(d.sel) };
+        this.fillTarget = null;
+        sc.setPointerCapture(e.pointerId);
+        this.pointer = { x, y };
+        this.startAutoScroll();
+        this.invalidate();
+        return;
+      }
+      const rcFirst = y < this.hh ? this.resizeColAt(x, y) : -1;
+      const fz = rcFirst < 0 ? this.freezeHit(x, y) : null;
+      if (fz) {
+        // Start from the top/left so boundaries line up with real rows/columns.
+        if (fz === "freezeRows") this.setScroll(d.scrollX, 0); else this.setScroll(0, d.scrollY);
+        this.drag = { kind: fz };
+        this.pointer = { x, y };
+        this.freezePreview = this.freezeCountAt(fz, x, y);
+        sc.setPointerCapture(e.pointerId);
+        sc.style.cursor = "grabbing";
+        this.invalidate();
+        return;
+      }
       const rc = this.resizeColAt(x, y);
       if (rc >= 0) {
         this.drag = { kind: "resize", col: rc, startX: x, startW: d.width(rc) };
@@ -1323,10 +1589,19 @@ export class Grid {
         this.invalidate();
         return;
       }
+      if (drag?.kind === "fill") { this.updateFillTarget(drag.src, x, y); this.invalidate(); return; }
+      if (drag?.kind === "freezeRows" || drag?.kind === "freezeCols") {
+        this.freezePreview = this.freezeCountAt(drag.kind, x, y);
+        this.invalidate();
+        return;
+      }
       if (drag) { this.dragTo(x, y); return; }
       // Hover feedback
       const rc = this.resizeColAt(x, y);
-      sc.style.cursor = rc >= 0 ? "col-resize" : "default";
+      const fz = rc < 0 || y >= this.hh ? this.freezeHit(x, y) : null;
+      const onFill = this.nearFillHandle(x, y);
+      sc.style.cursor = onFill ? "crosshair" : fz ? "grab" : rc >= 0 ? "col-resize" : "default";
+      if (fz !== this.hoverFreeze) { this.hoverFreeze = fz; this.invalidate(); }
       const hc = y < this.hh && x >= this.rowHeaderWidth() ? this.colAt(x) : -1;
       const chev = hc >= 0 && rc < 0 && x > this.colLeft(hc) + this.cw(hc) - 24 && this.cw(hc) > 44;
       if (hc !== this.hoverCol || chev !== this.hoverChevron) {
@@ -1337,7 +1612,26 @@ export class Grid {
     });
 
     const end = (e: PointerEvent) => {
-      if (this.drag?.kind === "resize") { this.doc?.remeasureAll(); this.hooks.onChange(); }
+      const drag = this.drag;
+      if (drag?.kind === "resize") { this.doc?.remeasureAll(); this.hooks.onChange(); }
+      if (drag?.kind === "fill") {
+        const t = this.fillTarget;
+        this.fillTarget = null;
+        this.drag = null;
+        if (t && e.type === "pointerup") this.fill(drag.src, t, e.ctrlKey || e.metaKey);
+        this.invalidate();
+      }
+      if ((drag?.kind === "freezeRows" || drag?.kind === "freezeCols") && this.doc && this.freezePreview !== null) {
+        const d = this.doc;
+        if (drag.kind === "freezeRows") d.setFrozen(this.freezePreview, d.frozenCols);
+        else d.setFrozen(d.frozenRows, this.freezePreview);
+        this.freezePreview = null;
+        sc.style.cursor = "grab";
+        this.drag = null;
+        this.layout();
+        this.select(d.sel, false);
+        this.hooks.onChange();
+      }
       this.drag = null;
       cancelAnimationFrame(this.autoScroll);
       this.autoScroll = 0;
@@ -1346,6 +1640,7 @@ export class Grid {
     sc.addEventListener("pointerup", end);
     sc.addEventListener("pointercancel", end);
     sc.addEventListener("pointerleave", () => {
+      if (!this.drag && this.hoverFreeze) { this.hoverFreeze = null; this.invalidate(); }
       if (!this.drag && this.hoverCol !== -1) { this.hoverCol = -1; this.hoverChevron = false; this.invalidate(); }
     });
 
@@ -1353,6 +1648,7 @@ export class Grid {
       const d = this.doc;
       if (!d) return;
       const { x, y } = this.local(e);
+      if (this.nearFillHandle(x, y)) { this.fillDownToNeighbour(); return; }
       const rc = this.resizeColAt(x, y);
       if (rc >= 0) { this.autoFit(rc); return; }
       if (this.zoneAt(x, y) === "cell") this.startEdit("edit");
@@ -1438,17 +1734,18 @@ export class Grid {
 
   private startAutoScroll() {
     const tick = () => {
-      if (!this.drag || this.drag.kind === "resize") return;
+      if (!this.drag || this.drag.kind === "resize" || this.drag.kind === "freezeRows" || this.drag.kind === "freezeCols") return;
       const { x, y } = this.pointer;
       const d = this.doc!;
       let dx = 0, dy = 0;
       if (y > this.scroller.clientHeight - 8) dy = (y - this.scroller.clientHeight + 8) * 1.2;
       else if (y < this.bodyTop && this.drag.kind !== "cols" && y > 0) dy = -(this.bodyTop - y) * 1.2;
       if (x > this.scroller.clientWidth - 8) dx = (x - this.scroller.clientWidth + 8);
-      else if (x < this.rowHeaderWidth() && this.drag.kind !== "rows") dx = -(this.rowHeaderWidth() - x);
+      else if (x < this.bodyLeft && this.drag.kind !== "rows") dx = -(this.bodyLeft - x);
       if (dx || dy) {
         this.setScroll(d.scrollX + dx, d.scrollY + dy);
-        this.dragTo(x, y);
+        if (this.drag.kind === "fill") this.updateFillTarget(this.drag.src, x, y);
+        else this.dragTo(x, y);
       }
       this.autoScroll = requestAnimationFrame(tick);
     };

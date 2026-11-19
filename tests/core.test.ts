@@ -5,6 +5,7 @@ import { Doc } from "../src/doc";
 import { parseNum, colName, colIndex } from "../src/util";
 import { applyNumFmt, parseDate, formatDate } from "../src/format";
 import { encodeBento, decodeBento } from "../src/bento";
+import { fillValues } from "../src/fill";
 
 let fails = 0;
 function eq(a: unknown, b: unknown, msg: string) {
@@ -96,6 +97,25 @@ eq(md.merges[0], { r0: 1, c0: 0, r1: 2, c1: 1 }, "delete anchor row shrinks merg
 eq(md.sortBy(0, false), false, "sort refused with vertical merge");
 md.undo(); md.undo(); md.undo();
 eq([md.merges.length, md.raw(1,1), md.raw(2,0)], [0, "b", "c"], "undo merge restores values");
+
+// Fill handle series
+eq(fillValues(["5"], 3, false), ["5","5","5"], "single number copies");
+eq(fillValues(["5"], 3, false, true), ["6","7","8"], "Ctrl counts single number");
+eq(fillValues(["1","2"], 3, false), ["3","4","5"], "1,2 continues");
+eq(fillValues(["2","4"], 2, false, true), ["2","4"], "Ctrl copies a series");
+eq(fillValues(["0.1","0.2"], 2, false), ["0.3","0.4"], "decimals stay clean");
+eq(fillValues(["1","2"], 2, true), ["0","-1"], "backwards");
+eq(fillValues(["1","3","4"], 2, false), ["5.6667","7.1667"], "linear trend");
+eq(fillValues(["Item 1"], 3, false), ["Item 2","Item 3","Item 4"], "text + number");
+eq(fillValues(["Q09"], 2, false), ["Q10","Q11"], "zero padding");
+eq(fillValues(["2026-01-30"], 3, false), ["2026-01-31","2026-02-01","2026-02-02"], "dates by day");
+eq(fillValues(["01/01/2026","08/01/2026"], 2, false), ["15/01/2026","22/01/2026"], "weekly dates");
+eq(fillValues(["Mon"], 3, false), ["Tue","Wed","Thu"], "weekdays");
+eq(fillValues(["Friday","Saturday"], 2, false), ["Sunday","Monday"], "weekdays wrap");
+eq(fillValues(["JAN","MAR"], 2, false), ["MAY","JUL"], "months step 2 keeps case");
+eq(fillValues(["a","b"], 3, false), ["a","b","a"], "text repeats");
+eq(fillValues(["a","b"], 3, true), ["b","a","b"], "text repeats backwards");
+eq(fillValues(["1","x"], 3, false), ["1","x","1"], "mixed repeats");
 
 (async () => {
   const bytes = await encodeBento(fd);

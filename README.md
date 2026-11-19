@@ -22,7 +22,9 @@ Every push to `main` builds a fresh installer automatically (see `.github/workfl
 - Edits like a spreadsheet: type, F2/Enter, Tab/Enter to move, Ctrl+arrows, Shift to extend, Ctrl+D fill down.
 - Copy and paste work with Excel and Google Sheets, and formulas keep their relative references when you paste them inside Bento.
 - Unlimited-feeling undo/redo (the last 300 steps).
-- Insert, delete and hide rows and columns, resize columns (double-click a border to auto-fit), and freeze the header row.
+- Insert, delete and hide rows and columns, and resize columns (double-click a border to auto-fit).
+- Freeze any number of rows and columns by dragging the bars in the top-left corner (or the freeze lines).
+- Fill handle: drag the dot on a selection to continue numbers, dates, weekdays, months and "Item 1"-style text, or to copy; Ctrl switches between the two. Double-click it to fill down alongside the neighbouring column.
 - Sort (numbers sort as numbers, blanks go last) and filter each column by value.
 - Find and replace, with match-case, whole-cell and regex options.
 - Formulas: `+ - * / ^ & %`, comparisons, `A1`, `$A$1`, `A1:B9`, `A:A`, plus `SUM AVERAGE MIN MAX COUNT COUNTA PRODUCT ROUND ABS IF IFERROR AND OR NOT CONCAT LEN UPPER LOWER TRIM`.

@@ -19,6 +19,8 @@ interface BentoFile {
   cellStyles: [number, number[]][];
   columns: { widths: Record<string, number>; hidden: number[] };
   freezeHeader: boolean;
+  frozenRows?: number;
+  frozenCols?: number;
   /** Merged ranges [r0, c0, r1, c1]. */
   merges?: [number, number, number, number][];
   filters: Record<string, string[]>;
@@ -78,6 +80,8 @@ export async function encodeBento(doc: Doc): Promise<Uint8Array> {
       hidden: [...doc.hidden],
     },
     freezeHeader: doc.freezeHeader,
+    frozenRows: doc.frozenRows,
+    frozenCols: doc.frozenCols,
     merges: doc.merges.filter((m) => m.r0 < n).map((m) => [m.r0, m.c0, Math.min(m.r1, n - 1), m.c1]),
     filters: Object.fromEntries([...doc.filters].map(([k, v]) => [String(k), [...v]])),
     csv: { delimiter: doc.delim, lineEnding: doc.eol, encoding: doc.encoding, bom: doc.bom },
@@ -101,7 +105,8 @@ export async function decodeBento(bytes: Uint8Array, doc: Doc) {
   for (const [r, st] of file.cellStyles ?? []) doc.setRowStyleArray(r, st.map((id) => map[id] ?? 0));
   doc.widths = new Map(Object.entries(file.columns?.widths ?? {}).map(([k, v]) => [Number(k), v]));
   doc.hidden = new Set(file.columns?.hidden ?? []);
-  doc.freezeHeader = file.freezeHeader ?? true;
+  doc.frozenRows = file.frozenRows ?? (file.freezeHeader === false ? 0 : 1);
+  doc.frozenCols = file.frozenCols ?? 0;
   doc.merges = (file.merges ?? []).map(([r0, c0, r1, c1]) => ({ r0, c0, r1, c1 }));
   doc.filters = new Map(Object.entries(file.filters ?? {}).map(([k, v]) => [Number(k), new Set(v)]));
   if (file.csv) {

@@ -596,7 +596,7 @@ export class App {
     } else {
       if (s.r0 === s.r1 && s.c0 === s.c1) { toast("Select two or more cells to merge"); return; }
       if (d.view) { toast("Clear filters before merging cells"); return; }
-      if (d.freezeHeader && s.r0 === 0 && s.r1 > 0) { toast("Can't merge across the frozen header row"); return; }
+      if ((s.r0 < d.frozenRows && s.r1 >= d.frozenRows) || (s.c0 < d.frozenCols && s.c1 >= d.frozenCols)) { toast("Can't merge across frozen rows or columns"); return; }
       if ((s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1) > 100_000) { toast("That's too many cells to merge"); return; }
       d.merge(rect);
     }
@@ -686,7 +686,7 @@ export class App {
       { label: "Find", key: "Ctrl+F", disabled: !d, action: () => this.find.open(false) },
       { label: "Find and replace", key: "Ctrl+H", disabled: !d, action: () => this.find.open(true) },
       "sep",
-      { label: "Freeze header row", checked: !!d?.freezeHeader, disabled: !d, action: () => this.toggleFreeze() },
+      { label: "Unfreeze rows and columns", disabled: !d || (!d.frozenRows && !d.frozenCols), action: () => { d!.setFrozen(0, 0); this.afterFreeze(); } },
       { label: "Clear all filters", disabled: !d?.filters.size, action: () => { d!.clearFilters(); this.afterStructure(); } },
       { label: "Unhide all columns", disabled: !d?.hidden.size, action: () => { d!.hidden.clear(); this.onChange(); } },
       "sep",
@@ -697,12 +697,9 @@ export class App {
     showMenu(items, r.left, r.bottom + 4, () => btn.classList.remove("open"));
   }
 
-  private toggleFreeze() {
+  private afterFreeze() {
     const d = this.active;
     if (!d) return;
-    d.freezeHeader = !d.freezeHeader;
-    d.refreshView();
-    d.version++;
     this.grid.setDoc(d);
     this.afterStructure();
   }
@@ -850,7 +847,8 @@ export class App {
     if (zone === "row") {
       showMenu([
         ...clipboard, "sep", ...this.rowItems(), "sep",
-        { label: "Freeze header row", checked: d.freezeHeader, action: () => this.toggleFreeze() },
+        { label: `Freeze up to row ${formatInt(d.dataRow(selRect(d.sel).r1) + 1)}`, action: () => { d.setFrozen(d.dataRow(selRect(d.sel).r1) + 1, d.frozenCols); this.afterFreeze(); } },
+        ...(d.frozenRows ? [{ label: "Unfreeze rows", action: () => { d.setFrozen(0, d.frozenCols); this.afterFreeze(); } } as MenuItem] : []),
       ], x, y);
       return;
     }
@@ -878,6 +876,9 @@ export class App {
       ...(d.filters.has(c) ? [{ label: "Remove filter", action: () => { d.setFilter(c, null); this.afterStructure(); } } as MenuItem] : []),
       "sep",
       ...this.colItems(),
+      "sep",
+      { label: `Freeze up to column ${colName(s.c1)}`, action: () => { d.setFrozen(d.frozenRows, s.c1 + 1); this.afterFreeze(); } },
+      ...(d.frozenCols ? [{ label: "Unfreeze columns", action: () => { d.setFrozen(d.frozenRows, 0); this.afterFreeze(); } } as MenuItem] : []),
       "sep",
       { label: s.c0 === s.c1 ? "Hide column" : "Hide columns", action: hideRange },
       ...(d.hidden.size ? [{ label: "Unhide all columns", action: () => { d.hidden.clear(); this.onChange(); } } as MenuItem] : []),
