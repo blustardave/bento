@@ -10,9 +10,16 @@ export interface Sel {
   ac: number;
   fr: number; // the other corner of the range
   fc: number;
+  /** Extra ranges added with Ctrl+click (display coordinates). */
+  extra?: Rect[];
 }
 
 export interface Rect { r0: number; c0: number; r1: number; c1: number }
+
+/** Every selected range: the main one first, then any Ctrl+clicked extras. */
+export function allRects(s: Sel): Rect[] {
+  return [selRect(s), ...(s.extra ?? [])];
+}
 
 export function selRect(s: Sel): Rect {
   return {

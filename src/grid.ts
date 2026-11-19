@@ -1,5 +1,5 @@
 import { fromTSV, toTSV } from "./csv";
-import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, selRect } from "./doc";
+import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, allRects, selRect } from "./doc";
 import { offsetFormula } from "./formula";
 import { fillValues } from "./fill";
 import { DEFAULT_FONT, DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
@@ -31,6 +31,7 @@ export interface GridHooks {
   onContextMenu(zone: Zone, x: number, y: number): void;
   onColumnMenu(c: number, x: number, y: number): void;
   onEditText(text: string | null): void;
+  onNotice?(text: string): void;
 }
 
 type Drag =
@@ -86,6 +87,7 @@ export class Grid {
   private get pad() { return Math.round(BASE_PAD * this.zoom); }
   private get font() { return `${13 * this.zoom}px ${FONT_STACK}`; }
   private get fontHead() { return `${12 * this.zoom}px ${FONT_STACK}`; }
+  private get fontHeadBold() { return `600 ${12 * this.zoom}px ${FONT_STACK}`; }
   /** On-screen width of a column. */
   private cw(c: number): number { return Math.round(this.doc!.width(c) * this.zoom); }
 
@@ -169,6 +171,7 @@ export class Grid {
       fr: clamp(sel.fr, 0, maxR), fc: clamp(sel.fc, 0, maxC),
     };
     ns = this.snapToMerges(ns);
+    if (sel.extra?.length) ns.extra = sel.extra;
     d.sel = ns;
     if (scroll) this.scrollIntoView(d.sel.fr, d.sel.fc);
     this.hooks.onSelection();
@@ -238,8 +241,16 @@ export class Grid {
   selectAll() {
     const d = this.doc;
     if (!d) return;
-    this.select({ ar: 0, ac: 0, fr: this.lastRow(), fc: Math.max(0, d.cols - 1) }, false);
+    this.select({ ar: 0, ac: 0, fr: this.fullRow(), fc: this.fullCol() }, false);
   }
+
+  /** Last row / column a whole-column / whole-row selection reaches. */
+  fullRow(): number { return Math.max(0, this.doc!.displayRows() - 1); }
+  fullCol(): number { return Math.max(0, this.doc!.displayCols() - 1); }
+
+  /** Does a range cover whole columns / whole rows? */
+  isWholeCols(r: Rect): boolean { return r.r0 === 0 && r.r1 >= this.fullRow(); }
+  isWholeRows(r: Rect): boolean { return r.c0 === 0 && r.c1 >= this.fullCol(); }
 
   /** Last display row that holds data. */
   lastRow(): number {
@@ -673,6 +684,15 @@ export class Grid {
       ctx.fillStyle = k.selFill;
       ctx.fillRect(selX0, selY0, selX1 - selX0, selY1 - selY0);
     }
+    const extras = (d.sel.extra ?? []).filter((e) => e.r1 >= r0 && e.r0 <= r1);
+    const extraBox = (e: Rect) => {
+      const x0 = this.colLeft(e.c0), x1 = this.colLeft(e.c1) + this.cw(e.c1);
+      const y0 = this.rowTop(Math.max(e.r0, r0)) - (e.r0 < r0 ? 3 : 0);
+      const y1 = this.rowTop(Math.min(e.r1, r1)) + this.rowH(Math.min(e.r1, r1)) + (e.r1 > r1 ? 3 : 0);
+      return { x0, y0, x1, y1 };
+    };
+    ctx.fillStyle = k.selFill;
+    for (const e of extras) { const b = extraBox(e); ctx.fillRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0); }
 
     // 2. Text. Overflowing text hides the grid lines it crosses.
     const skipV = new Set<number>(); // no vertical line after (r, c)
@@ -792,7 +812,10 @@ export class Grid {
       }
     }
 
-    // 4. Selection border + active cell.
+    // 4. Selection borders + active cell.
+    ctx.strokeStyle = k.accent;
+    ctx.lineWidth = 1;
+    for (const e of extras) { const b = extraBox(e); ctx.strokeRect(b.x0 - 0.5, b.y0 - 0.5, b.x1 - b.x0, b.y1 - b.y0); }
     if (selVisible) {
       ctx.strokeStyle = k.accent;
       ctx.lineWidth = 1;
@@ -816,18 +839,17 @@ export class Grid {
     if (s.s) ctx.fillRect(lx, Math.round(ty), tw, th);
   }
 
-  private drawColHeaders(c0: number, c1: number, sel: Rect, x0: number, x1: number) {
+  private drawColHeaders(c0: number, c1: number, _sel: Rect, x0: number, x1: number) {
     const { ctx, colors: k } = this;
     const d = this.doc!;
     const hh = this.hh;
+    const rects = allRects(d.sel);
     ctx.save();
     ctx.beginPath();
     ctx.rect(x0, 0, x1 - x0, hh);
     ctx.clip();
     ctx.fillStyle = k.bg;
     ctx.fillRect(x0, 0, x1 - x0, hh);
-    const whole = sel.r0 === 0 && sel.r1 >= this.lastRow();
-    ctx.font = this.fontHead;
     ctx.textBaseline = "middle";
     ctx.textAlign = "center";
     for (let c = c0; c <= c1; c++) {
@@ -838,7 +860,9 @@ export class Grid {
         ctx.fillRect(x - 2, 8, 3, hh - 16);
         continue;
       }
-      const inSel = c >= sel.c0 && c <= sel.c1;
+      const hits = rects.filter((r) => c >= r.c0 && c <= r.c1 && (!this.isWholeRows(r) || this.isWholeCols(r)));
+      const inSel = hits.length > 0;
+      const whole = hits.some((r) => this.isWholeCols(r));
       if (inSel) {
         ctx.fillStyle = whole ? k.selHeadStrong : k.selHead;
         ctx.fillRect(x, 0, cw, hh);
@@ -846,7 +870,8 @@ export class Grid {
         ctx.fillStyle = k.surface;
         ctx.fillRect(x, 0, cw, hh);
       }
-      ctx.fillStyle = inSel ? k.accentText : k.muted;
+      ctx.font = whole ? this.fontHeadBold : this.fontHead;
+      ctx.fillStyle = whole ? k.text : inSel ? k.accentText : k.muted;
       ctx.fillText(colName(c), x + cw / 2, hh / 2 + 0.5);
       if (d.filters.has(c)) {
         ctx.fillStyle = k.accent;
@@ -854,7 +879,7 @@ export class Grid {
       } else if (c === this.hoverCol && cw > 44) {
         const cx = x + cw - 14;
         if (this.hoverChevron) {
-          ctx.fillStyle = k.lineStrong;
+          ctx.fillStyle = k.surface2;
           this.roundRect(cx - 9, 5, 18, hh - 10, 4);
         }
         ctx.strokeStyle = k.text2;
@@ -865,30 +890,36 @@ export class Grid {
         ctx.lineTo(cx + 3.5, hh / 2 - 1.5);
         ctx.stroke();
       }
+      // Full-height separator, continuous with the grid line below.
       ctx.fillStyle = k.line;
-      ctx.fillRect(x + cw - 1, 6, 1, hh - 12);
+      ctx.fillRect(x + cw - 1, 0, 1, hh);
     }
     ctx.restore();
   }
 
-  private drawRowHeaders(r0: number, r1: number, sel: Rect, rhw: number) {
+  private drawRowHeaders(r0: number, r1: number, _sel: Rect, rhw: number) {
     const { ctx, colors: k, h } = this;
     const d = this.doc!;
+    const rects = allRects(d.sel);
     const draw = (r: number) => {
       const y = this.rowTop(r);
       const rh = this.rowH(r);
-      const inSel = r >= sel.r0 && r <= sel.r1;
+      // A whole-column selection doesn't light up every row number (and vice versa).
+      const hits = rects.filter((x) => r >= x.r0 && r <= x.r1 && (!this.isWholeCols(x) || this.isWholeRows(x)));
+      const inSel = hits.length > 0;
+      const whole = hits.some((x) => this.isWholeRows(x));
       if (inSel) {
-        ctx.fillStyle = k.selHead;
-        ctx.fillRect(0, y, rhw, rh);
+        ctx.fillStyle = whole ? k.selHeadStrong : k.selHead;
+        ctx.fillRect(0, y, rhw - 1, rh);
       }
-      ctx.fillStyle = inSel ? k.accentText : k.muted;
-      ctx.fillText(String(d.dataRow(r) + 1), rhw - 10 * this.zoom, y + rh / 2 + 0.5);
-      if (rh > this.rh) { ctx.fillStyle = k.line; ctx.fillRect(6, y + rh - 1, rhw - 12, 1); }
+      ctx.font = whole ? this.fontHeadBold : this.fontHead;
+      ctx.fillStyle = whole ? k.text : inSel ? k.accentText : k.muted;
+      ctx.fillText(String(d.dataRow(r) + 1), rhw / 2, y + rh / 2 + 0.5);
+      ctx.fillStyle = k.line;
+      ctx.fillRect(0, y + rh - 1, rhw - 1, 1);
     };
-    ctx.font = this.fontHead;
     ctx.textBaseline = "middle";
-    ctx.textAlign = "right";
+    ctx.textAlign = "center";
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, this.bodyTop, rhw, h - this.bodyTop);
@@ -980,7 +1011,7 @@ export class Grid {
   /** Where the fill handle sits (bottom-right of the selection), or null if hidden. */
   private fillHandlePos(): { x: number; y: number } | null {
     const d = this.doc;
-    if (!d || this.editing || d.loading !== null || this.drag?.kind === "fill") return null;
+    if (!d || this.editing || d.loading !== null || this.drag?.kind === "fill" || d.sel.extra?.length) return null;
     const s = selRect(d.sel);
     const b = this.cellBox(s.r1, s.c1);
     const x = b.x + b.w - 1, y = b.y + b.h - 1;
@@ -1272,6 +1303,7 @@ export class Grid {
   copy(cut = false): string | null {
     const d = this.doc;
     if (!d) return null;
+    if (d.sel.extra?.length) { this.hooks.onNotice?.("Copying more than one range at a time isn't supported"); return null; }
     const s = selRect(d.sel);
     const cells = (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
     if (cells > 5_000_000) return null;
@@ -1342,10 +1374,9 @@ export class Grid {
   clear(label = "Clear") {
     const d = this.doc;
     if (!d) return;
-    const s = selRect(d.sel);
     const cells: { r: number; c: number; v: string }[] = [];
     const lastData = d.view ? d.view.length - 1 : d.rows.length - 1;
-    for (let r = s.r0; r <= Math.min(s.r1, lastData); r++) {
+    for (const s of allRects(d.sel)) for (let r = s.r0; r <= Math.min(s.r1, lastData); r++) {
       const dr = d.dataRow(r);
       const row = d.rows[dr];
       if (!row) continue;
@@ -1464,11 +1495,11 @@ export class Grid {
         case "d": this.fillDown(); break;
         case "z": this.applyUndo(sh ? d.redo() : d.undo()); break;
         case "y": this.applyUndo(d.redo()); break;
-        case " ": this.select({ ar: s.ar, ac: s.ac, fr: this.lastRow(), fc: s.fc }); break;
+        case " ": this.select({ ar: 0, ac: s.ac, fr: this.fullRow(), fc: s.fc }, false); break;
         default: handled = false;
       }
     } else if (!handled && sh && e.key === " ") {
-      this.select({ ...s, fc: Math.max(0, d.cols - 1) });
+      this.select({ ar: s.ar, ac: 0, fr: s.fr, fc: this.fullCol() }, false);
       handled = true;
     }
     if (handled) e.preventDefault();
@@ -1534,7 +1565,7 @@ export class Grid {
         const s = selRect(d.sel);
         const r = this.rowAt(y), c = this.colAt(x);
         const inside = zone === "cell" ? r >= s.r0 && r <= s.r1 && c >= s.c0 && c <= s.c1
-          : zone === "col" ? c >= s.c0 && c <= s.c1 && s.r0 === 0 && s.r1 >= this.lastRow()
+          : zone === "col" ? c >= s.c0 && c <= s.c1 && this.isWholeCols(s)
           : zone === "row" ? r >= s.r0 && r <= s.r1 : true;
         if (!inside) this.pointSelect(zone, x, y, false);
         return;
@@ -1575,7 +1606,7 @@ export class Grid {
         this.onColumnHeaderMenu(c, rect.left + this.colLeft(c) + this.cw(c) - 24, rect.top + this.hh);
         return;
       }
-      this.pointSelect(zone, x, y, e.shiftKey);
+      this.pointSelect(zone, x, y, e.shiftKey, (e.ctrlKey || e.metaKey) && !e.shiftKey);
       this.drag = zone === "col" ? { kind: "cols" } : zone === "row" ? { kind: "rows" } : zone === "cell" ? { kind: "cells" } : null;
       if (this.drag) { sc.setPointerCapture(e.pointerId); this.pointer = { x, y }; this.startAutoScroll(); }
     });
@@ -1707,20 +1738,29 @@ export class Grid {
   onColumnHeaderMenu(c: number, x: number, y: number) {
     const d = this.doc!;
     const s = selRect(d.sel);
-    if (!(c >= s.c0 && c <= s.c1 && s.r0 === 0 && s.r1 >= this.lastRow())) {
-      this.select({ ar: 0, ac: c, fr: this.lastRow(), fc: c }, false);
+    if (!(c >= s.c0 && c <= s.c1 && this.isWholeCols(s))) {
+      this.select({ ar: 0, ac: c, fr: this.fullRow(), fc: c }, false);
     }
     this.hooks.onColumnMenu(c, x, y);
   }
 
-  private pointSelect(zone: Zone, x: number, y: number, extend: boolean) {
+  /**
+   * Click selection. Shift extends the current range to the clicked cell;
+   * Ctrl keeps what's selected and starts another range.
+   */
+  private pointSelect(zone: Zone, x: number, y: number, extend: boolean, add = false) {
     const d = this.doc!;
     const s = d.sel;
     const r = this.rowAt(y), c = this.colAt(x);
-    if (zone === "corner") this.selectAll();
-    else if (zone === "col") this.select(extend ? { ...s, ar: 0, fr: this.lastRow(), fc: c } : { ar: 0, ac: c, fr: this.lastRow(), fc: c }, false);
-    else if (zone === "row") this.select(extend ? { ...s, ac: 0, fr: r, fc: Math.max(0, d.cols - 1) } : { ar: r, ac: 0, fr: r, fc: Math.max(0, d.cols - 1) }, false);
-    else this.select(extend ? { ...s, fr: r, fc: c } : { ar: r, ac: c, fr: r, fc: c }, false);
+    const extra = add ? [...(s.extra ?? []), selRect(s)] : extend ? s.extra : undefined;
+    const R = this.fullRow(), C = this.fullCol();
+    if (zone === "corner") { this.selectAll(); return; }
+    let next: Sel;
+    if (zone === "col") next = extend ? { ar: 0, ac: s.ac, fr: R, fc: c } : { ar: 0, ac: c, fr: R, fc: c };
+    else if (zone === "row") next = extend ? { ar: s.ar, ac: 0, fr: r, fc: C } : { ar: r, ac: 0, fr: r, fc: C };
+    else next = extend ? { ...s, fr: r, fc: c } : { ar: r, ac: c, fr: r, fc: c };
+    next.extra = extra;
+    this.select(next, false);
   }
 
   private dragTo(x: number, y: number) {

@@ -31,6 +31,8 @@ export function showMenu(items: MenuItem[], x: number, y: number, onClose?: () =
     buttons.push(b);
     menu.append(b);
   }
+  // Leaving the menu clears the highlight (keyboard navigation sets it again).
+  menu.addEventListener("mouseleave", () => setHot(-1));
   document.body.append(menu);
 
   // Keep it on screen.

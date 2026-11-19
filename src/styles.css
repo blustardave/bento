@@ -214,7 +214,8 @@ input, textarea { font: inherit; color: inherit; }
 #toolbar .tb:disabled { opacity: 0.35; }
 #toolbar .tb.on { color: var(--accent-text); background: var(--accent-soft); }
 #toolbar .tb .txt { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
-#toolbar .tb .caret { width: 8px; height: 8px; opacity: 0.7; }
+#toolbar .tb .caret { width: 12px; height: 12px; margin: 0 -3px 0 -2px; opacity: 0.6; }
+#toolbar .tb svg { flex: none; display: block; }
 #toolbar .div { width: 1px; height: 18px; background: var(--line-strong); margin: 0 6px; flex: none; }
 #toolbar .grow { flex: 1; }
 
@@ -551,15 +552,23 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 
 #toolbar { overflow-x: auto; scrollbar-width: none; }
 #toolbar::-webkit-scrollbar { display: none; }
-#toolbar .tb .glyph { font-size: 14px; line-height: 1; min-width: 10px; text-align: center; font-weight: 600; }
+/* Letter-style buttons share one box with the icons: 16px tall, centred. */
+#toolbar .tb .glyph {
+  display: block;
+  height: 16px;
+  line-height: 16px;
+  min-width: 16px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+}
 #toolbar .tb .glyph.bold { font-weight: 700; }
-#toolbar .tb .glyph.italic { font-family: var(--font-serif); font-style: italic; font-weight: 600; font-size: 15px; }
-#toolbar .tb .glyph.underline { text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1.4px; }
-#toolbar .tb .glyph.strike { text-decoration: line-through; text-decoration-thickness: 1.4px; }
-#toolbar .tb .glyph.sym { font-size: 13px; }
-#toolbar .tb .glyph.small { font-size: 11.5px; letter-spacing: 0.02em; }
-#toolbar .tb .glyph.dec { font-size: 12px; letter-spacing: 0.01em; }
-#toolbar .tb .glyph.dec + svg { width: 12px; height: 12px; margin-left: -2px; }
+#toolbar .tb .glyph.italic { font-style: italic; font-weight: 600; font-size: 14.5px; }
+#toolbar .tb .glyph.strike { text-decoration: line-through; text-decoration-thickness: 1.5px; }
+#toolbar .tb .glyph.sym { font-size: 14px; }
+#toolbar .tb .glyph.small { font-size: 12.5px; letter-spacing: 0.01em; }
+#toolbar .tb .glyph.dec { font-size: 13px; min-width: 0; letter-spacing: -0.01em; }
+#toolbar .tb .glyph.dec + svg { width: 14px; height: 14px; margin-left: -1px; }
 
 .stepper { display: flex; align-items: center; gap: 1px; }
 .stepper .tb { min-width: 24px !important; padding: 0 4px !important; }
@@ -632,12 +641,16 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 }
 .zoom-input:focus { color: var(--text); box-shadow: inset 0 0 0 1.5px var(--accent); }
 #toolbar .tb.caret-btn { min-width: 18px; padding: 0 3px 0 0; }
-#toolbar .tb.caret-btn svg { width: 10px; height: 10px; opacity: 0.7; }
+#toolbar .tb.caret-btn svg { width: 12px; height: 12px; opacity: 0.6; }
 #toolbar .tb.caret-btn:hover { background: transparent; }
-#toolbar .tb.font-btn { width: 108px; justify-content: space-between; padding: 0 6px 0 8px; }
-#toolbar .tb.font-btn .txt { overflow: hidden; text-overflow: ellipsis; font-weight: 600; font-size: 13px; text-align: left; flex: 1; }
+#toolbar .tb.font-btn { width: 104px; justify-content: space-between; padding: 0 6px 0 8px; }
+#toolbar .tb.font-btn .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; font-size: 13px; text-align: left; flex: 1; }
 
 /* preferences */
 .modal.prefs .pref { display: flex; flex-direction: column; gap: 6px; margin: 14px 0 6px; color: var(--text-2); }
 .modal.prefs select.field { height: 34px; padding: 0 8px; color: var(--text); font: inherit; }
 .modal.prefs .hint { color: var(--muted); font-size: 12px; margin: 0 0 18px; }
+
+/* Toolbar items never squash; a narrow window scrolls the toolbar instead. */
+#toolbar > * { flex-shrink: 0; }
+#toolbar > .grow { flex: 1 0 8px; }

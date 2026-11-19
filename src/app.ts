@@ -1,5 +1,5 @@
 import { CsvParser, Delimiter, LineEnding, delimiterLabel, sniffDelimiter, sniffLineEnding } from "./csv";
-import { Doc, selRect } from "./doc";
+import { Doc, allRects, selRect } from "./doc";
 import { Encoding, decodeBytes, encodeText, encodingLabel } from "./encoding";
 import { openFilter } from "./filter";
 import { FindPanel } from "./find";
@@ -54,6 +54,7 @@ export class App {
       onChange: () => this.onChange(),
       onContextMenu: (zone, x, y) => this.contextMenu(zone, x, y),
       onColumnMenu: (c, x, y) => this.columnMenu(c, x, y),
+      onNotice: (t) => toast(t),
       onEditText: (t) => { if (document.activeElement !== this.cellInput) this.cellInput.value = t ?? this.activeRaw(); },
     });
     this.find = new FindPanel(this.grid, () => this.active, () => this.onChange());
@@ -414,12 +415,13 @@ export class App {
       right.textContent = "";
       const d = this.active;
       if (!d || d.loading !== null) return;
-      const s = selRect(d.sel);
-      const cells = (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
+      const rects = allRects(d.sel);
+      const cells = rects.reduce((n, s) => n + (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1), 0);
       if (cells <= 1) return;
-      const lastRow = Math.min(s.r1, (d.view ? d.view.length : d.rows.length) - 1);
+      const dataEnd = (d.view ? d.view.length : d.rows.length) - 1;
       let sum = 0, nums = 0, filled = 0;
-      if (cells <= 3_000_000) {
+      if (cells <= 3_000_000) for (const s of rects) {
+        const lastRow = Math.min(s.r1, dataEnd);
         for (let r = s.r0; r <= lastRow; r++) {
           const dr = d.dataRow(r);
           const row = d.rows[dr];
@@ -452,7 +454,8 @@ export class App {
     const name = (r: number, c: number) => cellName(d.dataRow(r), c);
     $("cell-name").textContent = s.r0 === s.r1 && s.c0 === s.c1
       ? name(d.sel.ar, d.sel.ac)
-      : s.r0 === 0 && s.r1 >= this.grid.lastRow() ? (s.c0 === s.c1 ? colName(s.c0) : `${colName(s.c0)}:${colName(s.c1)}`)
+      : this.grid.isWholeCols(s) ? (s.c0 === s.c1 ? colName(s.c0) : `${colName(s.c0)}:${colName(s.c1)}`)
+      : this.grid.isWholeRows(s) ? (s.r0 === s.r1 ? `${d.dataRow(s.r0) + 1}` : `${d.dataRow(s.r0) + 1}:${d.dataRow(s.r1) + 1}`)
       : `${name(s.r0, s.c0)}:${name(s.r1, s.c1)}`;
     if (!this.grid.editing && document.activeElement !== this.cellInput) this.cellInput.value = this.activeRaw();
     this.renderStats();
@@ -624,11 +627,11 @@ export class App {
   applyFormat(patch: (s: Style) => Style, label: string) {
     const d = this.active;
     if (!d || d.loading !== null) return;
-    const s = selRect(d.sel);
-    const count = (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
+    const rects = allRects(d.sel);
+    const count = rects.reduce((n, s) => n + (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1), 0);
     if (count > 5_000_000) { toast("That selection is too big to format in one go", true); return; }
     const cells: { r: number; c: number }[] = [];
-    for (let r = s.r0; r <= s.r1; r++) {
+    for (const s of rects) for (let r = s.r0; r <= s.r1; r++) {
       if (d.view && r >= d.view.length) break;
       const dr = d.dataRow(r);
       for (let c = s.c0; c <= s.c1; c++) cells.push({ r: dr, c });
@@ -885,7 +888,7 @@ export class App {
   }
 
   private async clipboardWrite(text: string | null) {
-    if (text === null) { toast("That selection is too big to copy", true); return; }
+    if (text === null) { if (!this.active?.sel.extra?.length) toast("That selection is too big to copy", true); return; }
     try { await navigator.clipboard.writeText(text); } catch { toast("Couldn't reach the clipboard — try Ctrl+C", true); }
     this.onChange();
   }
