@@ -261,7 +261,8 @@ export class Doc {
       if (any) changes.push(ch);
     }
     if (!changes.length) return;
-    const remeasure = () => this.remeasure(changes.filter((ch) => ch.sa !== undefined || this.styleId(ch.r, ch.c) !== 0).map((ch) => ch.r));
+    const remeasure = () => this.remeasure(changes.filter((ch) =>
+      ch.sa !== undefined || this.styleId(ch.r, ch.c) !== 0 || ch.va?.includes("\n") || ch.vb?.includes("\n")).map((ch) => ch.r));
     this.push({
       label,
       selBefore: { ...this.sel },
@@ -365,7 +366,7 @@ export class Doc {
     for (const r of new Set(rows)) {
       const row = this.rows[r];
       if (!row) continue;
-      const h = this.rowStyles.has(row) ? this.measureRow(r) : 0;
+      const h = this.measureRow(r);
       const had = this.rowHeights.has(row);
       if (h > 0) { if (!had) this.tallRows++; this.rowHeights.set(row, h); }
       else if (had) { this.tallRows--; this.rowHeights.delete(row); }
@@ -375,7 +376,10 @@ export class Doc {
   /** Re-measure every formatted row (after a column resize or on load). */
   remeasureAll() {
     const rows: number[] = [];
-    for (let r = 0; r < this.rows.length; r++) if (this.rowStyles.has(this.rows[r])) rows.push(r);
+    for (let r = 0; r < this.rows.length; r++) {
+      const row = this.rows[r];
+      if (this.rowStyles.has(row) || row.some((v) => v.includes("\n"))) rows.push(r);
+    }
     this.remeasure(rows);
     this.version++;
   }

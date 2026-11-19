@@ -24,7 +24,7 @@
   --accent-softer: rgba(217, 119, 87, 0.06);
   --sel-fill: rgba(217, 119, 87, 0.065);
   --sel-head: rgba(217, 119, 87, 0.15);
-  --sel-head-strong: rgba(217, 119, 87, 0.22);
+  --sel-head-strong: rgba(217, 119, 87, 0.32);
   --on-accent: #faf9f5;
   --error: #c4453a;
   --match: rgba(230, 180, 60, 0.28);
@@ -50,7 +50,7 @@
   --accent-softer: rgba(236, 158, 129, 0.1);
   --sel-fill: rgba(236, 158, 129, 0.12);
   --sel-head: rgba(236, 158, 129, 0.22);
-  --sel-head-strong: rgba(236, 158, 129, 0.32);
+  --sel-head-strong: rgba(236, 158, 129, 0.42);
   --on-accent: #33312d;
   --error: #ff9585;
   --match: rgba(240, 195, 90, 0.26);
@@ -75,7 +75,7 @@
   --accent-softer: rgba(224, 138, 109, 0.08);
   --sel-fill: rgba(224, 138, 109, 0.1);
   --sel-head: rgba(224, 138, 109, 0.18);
-  --sel-head-strong: rgba(224, 138, 109, 0.26);
+  --sel-head-strong: rgba(224, 138, 109, 0.36);
   --on-accent: #262624;
   --error: #ef7a6e;
   --match: rgba(230, 180, 60, 0.22);
@@ -680,3 +680,9 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 /* Toolbar items never squash; a narrow window scrolls the toolbar instead. */
 #toolbar > * { flex-shrink: 0; }
 #toolbar > .grow { flex: 1 0 8px; }
+
+/* Check-for-updates button (sits where the update pill appears). */
+.check-btn { margin-right: 6px; }
+.check-btn svg { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.check-btn.spinning svg { animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

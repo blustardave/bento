@@ -81,6 +81,8 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Reopen at the size/position (and maximised state) it was closed at.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .invoke_handler(tauri::generate_handler![read_file, write_file, launch_files])
         .run(tauri::generate_context!())
         .expect("error while running Bento");

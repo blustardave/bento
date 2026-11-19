@@ -135,7 +135,13 @@ export const windowControls = {
     if (isTauri) {
       (await win()).onCloseRequested(async (e) => {
         e.preventDefault();
-        if (await cb()) (await win()).destroy();
+        if (await cb()) {
+          try {
+            const { saveWindowState, StateFlags } = await import("@tauri-apps/plugin-window-state");
+            await saveWindowState(StateFlags.ALL);
+          } catch (err) { console.warn(err); }
+          (await win()).destroy();
+        }
       });
     }
   },

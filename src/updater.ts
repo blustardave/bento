@@ -12,23 +12,37 @@ export async function appVersion(): Promise<string> {
   return getVersion();
 }
 
-export function initUpdater(onReady: (version: string, install: () => Promise<void>) => void) {
-  if (!isTauri) return;
+export type CheckResult = "found" | "none" | "error";
+
+export function initUpdater(onReady: (version: string, install: () => Promise<void>) => void): { checkNow(): Promise<CheckResult> } {
   let found = false;
-  const run = async () => {
-    if (found) return;
-    try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const update = await check();
-      if (!update) return;
-      await update.download();
-      found = true;
-      onReady(update.version, () => update.install());
-    } catch (e) {
-      // Offline, GitHub hiccup, etc. — just try again later.
-      console.warn("Update check failed", e);
-    }
+  let running: Promise<CheckResult> | null = null;
+  const run = (): Promise<CheckResult> => {
+    if (!isTauri) return Promise.resolve("none");
+    if (found) return Promise.resolve("found");
+    if (running) return running;
+    running = (async (): Promise<CheckResult> => {
+      try {
+        const { check } = await import("@tauri-apps/plugin-updater");
+        const update = await check();
+        if (!update) return "none";
+        await update.download();
+        found = true;
+        onReady(update.version, () => update.install());
+        return "found";
+      } catch (e) {
+        // Offline, GitHub hiccup, etc. — the hourly check will try again.
+        console.warn("Update check failed", e);
+        return "error";
+      } finally {
+        running = null;
+      }
+    })();
+    return running;
   };
-  setTimeout(run, 4000);
-  setInterval(run, HOUR);
+  if (isTauri) {
+    setTimeout(run, 4000);
+    setInterval(run, HOUR);
+  }
+  return { checkNow: run };
 }

@@ -18,6 +18,7 @@
     "updater:default",
     "core:app:allow-version",
     "core:window:allow-set-background-color",
-    "core:webview:allow-set-webview-background-color"
+    "core:webview:allow-set-webview-background-color",
+    "window-state:default"
   ]
 }

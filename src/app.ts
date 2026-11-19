@@ -74,8 +74,10 @@ export class App {
     );
     onOpenFiles((paths) => this.open(paths.map((p) => ({ name: basename(p), path: p }))));
     windowControls.onCloseRequested(() => this.confirmQuit());
-    initUpdater((version, install) => {
+    const check = $("check-btn");
+    const updater = initUpdater((version, install) => {
       const btn = $("update-btn");
+      check.hidden = true;
       btn.hidden = false;
       btn.title = `Bento ${version} is ready to install`;
       btn.onclick = async () => {
@@ -84,6 +86,18 @@ export class App {
         btn.textContent = "Updating…";
         try { await install(); } catch (e) { toast(`Update failed: ${e}`, true); btn.textContent = "Update ready · Restart"; }
       };
+    });
+    if (!isTauri) check.hidden = true;
+    check.addEventListener("click", async () => {
+      if (check.classList.contains("spinning")) return;
+      check.classList.add("spinning");
+      const started = Date.now();
+      const result = await updater.checkNow();
+      // Spin for at least a moment so the click visibly did something.
+      await new Promise((r) => setTimeout(r, Math.max(0, 600 - (Date.now() - started))));
+      check.classList.remove("spinning");
+      if (result === "none") toast(`You're up to date (version ${await appVersion()})`);
+      else if (result === "error") toast("Couldn't check for updates — are you online?", true);
     });
     const files = await launchFiles();
     if (files.length) this.open(files.map((p) => ({ name: basename(p), path: p })));
@@ -180,6 +194,7 @@ export class App {
     doc.view = null;
     doc.loading = null;
     this.grid.autoFitInitial(doc);
+    doc.remeasureAll(); // rows with line breaks grow to fit
     if (this.active === doc) this.grid.setDoc(doc);
     this.render();
     this.onSelection();
@@ -956,7 +971,9 @@ export class App {
       const ctrl = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();
       const d = this.active;
-      if (ctrl && k === "n") { e.preventDefault(); this.newDoc(); }
+      const typing = (() => { const a = document.activeElement; return a instanceof HTMLInputElement || a instanceof HTMLSelectElement || a === this.grid.editor; })();
+      if (ctrl && k === "a" && d && !typing && !e.defaultPrevented) { e.preventDefault(); this.grid.selectAll(); this.grid.focus(); }
+      else if (ctrl && k === "n") { e.preventDefault(); this.newDoc(); }
       else if (ctrl && k === "o") { e.preventDefault(); this.openDialog(); }
       else if (ctrl && k === "s") { e.preventDefault(); this.save(d, e.shiftKey); }
       else if (ctrl && !e.shiftKey && k === "e") { e.preventDefault(); this.exportCsv(d); }
