@@ -2,6 +2,7 @@ import { Doc } from "./doc";
 import { Grid } from "./grid";
 import { toast } from "./ui";
 import { el, formatInt } from "./util";
+import { icon } from "./toolbar";
 
 const MAX_MATCHES = 100_000;
 
@@ -12,6 +13,7 @@ export class FindPanel {
   private q: HTMLInputElement;
   private rep: HTMLInputElement;
   private repRow: HTMLElement;
+  private showRep!: HTMLElement;
   private count: HTMLElement;
   private opts = { caseSensitive: false, whole: false, regex: false };
   private matches: Match[] = [];
@@ -21,29 +23,36 @@ export class FindPanel {
   private searchedVersion = -1;
 
   constructor(private grid: Grid, private getDoc: () => Doc | null, private onChange: () => void) {
-    this.q = el("input", { class: "field", placeholder: "Find", spellcheck: "false" });
-    this.rep = el("input", { class: "field", placeholder: "Replace with", spellcheck: "false" });
+    this.q = el("input", { class: "find-input", placeholder: "Find in sheet", spellcheck: "false" });
+    this.rep = el("input", { class: "find-input", placeholder: "Replace with", spellcheck: "false" });
     this.count = el("span", { class: "count" });
-    const prev = el("button", { class: "small-btn", title: "Previous (Shift+Enter)", text: "↑" });
-    const next = el("button", { class: "small-btn", title: "Next (Enter)", text: "↓" });
-    const close = el("button", { class: "small-btn", title: "Close (Esc)", text: "✕" });
+    const iconBtn = (name: Parameters<typeof icon>[0], title: string, flip = false) => {
+      const b = el("button", { class: "find-icon", title }, icon(name, 15));
+      if (flip) b.style.transform = "scaleY(-1)";
+      return b;
+    };
+    const prev = iconBtn("caret", "Previous (Shift+Enter)", true);
+    const next = iconBtn("caret", "Next (Enter)");
+    const close = el("button", { class: "find-icon", title: "Close (Esc)" });
+    close.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M4.25 4.25l7.5 7.5M11.75 4.25l-7.5 7.5"/></svg>';
     const toggles = (["caseSensitive", "whole", "regex"] as const).map((k) => {
-      const label = k === "caseSensitive" ? "Aa" : k === "whole" ? "Whole cell" : ".* Regex";
+      const label = k === "caseSensitive" ? "Match case" : k === "whole" ? "Whole cell" : "Regex";
       const title = k === "caseSensitive" ? "Match case" : k === "whole" ? "Match entire cell" : "Regular expression";
-      const b = el("button", { class: "toggle", text: label, title });
+      const b = el("button", { class: "find-opt", text: label, title });
       b.addEventListener("click", () => { this.opts[k] = !this.opts[k]; b.classList.toggle("on", this.opts[k]); this.search(); this.q.focus(); });
       return b;
     });
-    const repOne = el("button", { class: "small-btn", text: "Replace" });
-    const repAll = el("button", { class: "small-btn primary", text: "Replace all" });
-    const showRep = el("button", { class: "toggle", text: "Replace", title: "Show replace (Ctrl+H)" });
+    const repOne = el("button", { class: "find-opt", text: "Replace" });
+    const repAll = el("button", { class: "find-opt strong", text: "Replace all" });
+    const showRep = el("button", { class: "find-opt", text: "Replace…", title: "Show replace (Ctrl+H)" });
+    this.showRep = showRep;
     showRep.addEventListener("click", () => this.setReplace(this.repRow.hidden));
-    this.repRow = el("div", { class: "row" }, this.rep, repOne, repAll);
+    this.repRow = el("div", { class: "row field-row" }, icon("redo", 15), this.rep, repOne, repAll);
     this.repRow.hidden = true;
     this.root = el("div", { class: "panel find" },
-      el("div", { class: "row" }, this.q, this.count, prev, next, close),
-      el("div", { class: "row opts" }, ...toggles, el("span", { style: "flex:1" }), showRep),
+      el("div", { class: "row field-row" }, icon("search", 15), this.q, this.count, prev, next, close),
       this.repRow,
+      el("div", { class: "row opts" }, ...toggles, el("span", { style: "flex:1" }), showRep),
     );
     this.root.hidden = true;
     document.body.append(this.root);
@@ -83,6 +92,7 @@ export class FindPanel {
 
   private setReplace(on: boolean) {
     this.repRow.hidden = !on;
+    this.showRep.classList.toggle("on", on);
   }
 
   /** Re-run the search if the sheet changed since last time. */

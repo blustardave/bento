@@ -92,7 +92,7 @@ export class Grid {
   private get font() { return `${13 * this.zoom}px ${FONT_STACK}`; }
   private get fontHead() { return `${12 * this.zoom}px ${FONT_STACK}`; }
   /** Thickness of the freeze bars / lines. */
-  private get freezeBar() { return this.S(Math.max(3, Math.round(4 * this.zoom))); }
+  private get freezeBar() { return this.S(Math.max(2, Math.round(2 * this.zoom))); }
   private get fontHeadBold() { return `600 ${12 * this.zoom}px ${FONT_STACK}`; }
   /** On-screen width of a column. */
   private cw(c: number): number { return this.S(this.doc!.width(c) * this.zoom); }
@@ -633,8 +633,8 @@ export class Grid {
     // the corner's edges; once frozen, the bar leaves the corner and becomes
     // the line across the sheet.
     const bar = this.freezeBar;
-    const rowsColor = hot("freezeRows") ? k.accent : k.muted;
-    const colsColor = hot("freezeCols") ? k.accent : k.muted;
+    const rowsColor = hot("freezeRows") ? k.accent : k.lineStrong;
+    const colsColor = hot("freezeCols") ? k.accent : k.lineStrong;
     const hidingRows = drag?.kind === "freezeRows";
     const hidingCols = drag?.kind === "freezeCols";
     if (!hidingRows) {
@@ -1255,7 +1255,7 @@ export class Grid {
       ctx.globalAlpha = 0.35;
       ctx.fillRect(0, pos - bar, this.w, bar);
       ctx.globalAlpha = 1;
-      ctx.fillStyle = k.muted;
+      ctx.fillStyle = k.lineStrong;
       ctx.fillRect(0, clamp(y, this.hh, this.h) - bar / 2, this.w, bar);
     } else {
       const pos = this.rowHeaderWidth() + this.xs[this.freezePreview];
@@ -1263,7 +1263,7 @@ export class Grid {
       ctx.globalAlpha = 0.35;
       ctx.fillRect(pos - bar, 0, bar, this.h);
       ctx.globalAlpha = 1;
-      ctx.fillStyle = k.muted;
+      ctx.fillStyle = k.lineStrong;
       ctx.fillRect(clamp(x, this.rowHeaderWidth(), this.w) - bar / 2, 0, bar, this.h);
     }
     ctx.restore();

@@ -690,3 +690,56 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .check-btn svg { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .check-btn.spinning svg { animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ----------------------- quieter, squarer popups ----------------------- */
+
+.menu { border-radius: 7px; padding: 4px; }
+.menu .item { border-radius: 4px; }
+.panel { border-radius: 8px; }
+.popover { padding: 4px; }
+.icon-row .tb { border-radius: 4px; }
+.palette .reset { border-radius: 4px; }
+.palette .swatch { border-radius: 4px; }
+.filter label { border-radius: 4px; }
+.modal { border-radius: 10px; }
+
+/* Find: one flat search line, plain-text options, borderless icons. */
+.find { width: 440px; padding: 6px 8px 8px; gap: 2px; }
+.find .field-row {
+  height: 36px;
+  gap: 8px;
+  padding: 0 2px 0 6px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+.find .field-row svg { flex: none; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.find-input {
+  flex: 1; min-width: 0;
+  height: 30px;
+  border: 0; outline: 0; background: transparent;
+  font-size: 14px;
+  color: var(--text);
+  user-select: text;
+}
+.find-input::placeholder { color: var(--muted); }
+.find .count { min-width: 0; margin-right: 2px; }
+.find-icon {
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: 5px;
+  color: var(--text-2);
+  transition: background var(--ease), color var(--ease);
+}
+.find-icon:hover { background: var(--surface); color: var(--text); }
+.find .opts { gap: 2px; padding: 6px 0 0 2px; }
+.find-opt {
+  height: 24px; padding: 0 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  transition: color var(--ease), background var(--ease);
+}
+.find-opt:hover { color: var(--text); background: var(--surface); }
+.find-opt.on { color: var(--accent-text); font-weight: 600; }
+.find-opt.strong { color: var(--accent-text); font-weight: 600; }
