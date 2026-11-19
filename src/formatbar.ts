@@ -49,8 +49,8 @@ export class FormatBar {
         c.apply((s) => ({ ...s, nf: s.nf?.k === "cur" ? undefined : { k: "cur", cur: defaultCurrency(), dp: 2, sep: true } }), "Currency") })),
       t("pct", toolButton({ glyph: "%", glyphClass: "sym", title: "Format as percent", onClick: () =>
         c.apply((s) => ({ ...s, nf: s.nf?.k === "pct" ? undefined : { k: "pct", dp: 2 } }), "Percent") })),
-      t("decDown", toolButton({ glyph: ".0", glyphClass: "dec", icon: "arrowL", title: "Decrease decimal places", onClick: () => this.stepDecimals(-1) })),
-      t("decUp", toolButton({ glyph: ".00", glyphClass: "dec", icon: "arrowR", title: "Increase decimal places", onClick: () => this.stepDecimals(1) })),
+      t("decDown", toolButton({ icon: "decDown", title: "Decrease decimal places", onClick: () => this.stepDecimals(-1) })),
+      t("decUp", toolButton({ icon: "decUp", title: "Increase decimal places", onClick: () => this.stepDecimals(1) })),
       t("numFmt", toolButton({ glyph: "123", glyphClass: "sym small", caret: true, title: "More formats", onClick: (b) => {
         const r = b.getBoundingClientRect();
         const isText = c.active()?.style.nf?.k === "text";
@@ -60,8 +60,6 @@ export class FormatBar {
         ], r.left, r.bottom + 4, () => b.classList.remove("open"));
       } })),
     ];
-    // Decimal buttons read ".0 ←" / ".00 →": glyph first, then the arrow.
-    for (const k of ["decDown", "decUp"]) { const b = this.t[k].el; b.append(b.firstElementChild!); }
 
     /* Font */
     const fontBtn = toolButton({ text: "Default", caret: true, title: "Font", onClick: (b) => {
@@ -114,9 +112,9 @@ export class FormatBar {
       c.apply((s) => ({ ...s, [key]: on ? (key === "b" && a?.header ? false : undefined) : true }), label);
     };
     const text = [
-      t("b", toolButton({ glyph: "B", glyphClass: "bold", title: "Bold (Ctrl+B)", onClick: toggle("b", "Bold") })),
-      t("i", toolButton({ glyph: "I", glyphClass: "italic", title: "Italic (Ctrl+I)", onClick: toggle("i", "Italic") })),
-      t("s", toolButton({ glyph: "S", glyphClass: "strike", title: "Strikethrough (Alt+Shift+5)", onClick: toggle("s", "Strikethrough") })),
+      t("b", toolButton({ icon: "bold", title: "Bold (Ctrl+B)", onClick: toggle("b", "Bold") })),
+      t("i", toolButton({ icon: "italic", title: "Italic (Ctrl+I)", onClick: toggle("i", "Italic") })),
+      t("s", toolButton({ icon: "strike", title: "Strikethrough (Alt+Shift+5)", onClick: toggle("s", "Strikethrough") })),
       t("color", toolButton({ icon: "textColor", title: "Text colour", onClick: (b) => this.palette(b, "color") })),
     ];
 

@@ -669,8 +669,12 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 #toolbar .tb.caret-btn { min-width: 18px; padding: 0 3px 0 0; }
 #toolbar .tb.caret-btn svg { width: 12px; height: 12px; opacity: 0.6; }
 #toolbar .tb.caret-btn:hover { background: transparent; }
-#toolbar .tb.font-btn { width: 104px; justify-content: space-between; padding: 0 6px 0 8px; }
-#toolbar .tb.font-btn .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; font-size: 13px; text-align: left; flex: 1; }
+#toolbar .tb.font-btn { width: 92px; justify-content: space-between; gap: 2px; padding: 0 4px 0 8px; }
+#toolbar .tb.font-btn .txt {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500; font-size: 14px; line-height: 16px; height: 16px;
+  text-align: left; flex: 1; min-width: 0;
+}
 
 /* preferences */
 .modal.prefs .pref { display: flex; flex-direction: column; gap: 6px; margin: 14px 0 6px; color: var(--text-2); }
