@@ -9,6 +9,8 @@ import {
   windowControls, writeFile,
 } from "./native";
 import { MenuItem, closeMenus, modal, showMenu, toast } from "./ui";
+import { ToolButton, divider, grow, toolButton } from "./toolbar";
+import { ZOOMS } from "./grid";
 import { appVersion, initUpdater } from "./updater";
 import { basename, cellName, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 
@@ -23,6 +25,7 @@ export class App {
   private untitled = 0;
   private statsTimer = 0;
   private cellInput = $("cell-input") as HTMLInputElement;
+  private tools: Record<string, ToolButton> = {};
 
   constructor() {
     this.grid = new Grid({
@@ -33,6 +36,7 @@ export class App {
       onEditText: (t) => { if (document.activeElement !== this.cellInput) this.cellInput.value = t ?? this.activeRaw(); },
     });
     this.find = new FindPanel(this.grid, () => this.active, () => this.onChange());
+    this.buildToolbar();
     this.bindChrome();
     this.bindKeys();
     this.bindCellBar();
@@ -244,6 +248,7 @@ export class App {
     this.renderStatus();
     const d = this.active;
     windowControls.setTitle(d ? `${d.name}${d.dirty ? " •" : ""} — Bento` : "Bento");
+    this.refreshToolbar();
   }
 
   private renderTabs() {
@@ -271,6 +276,7 @@ export class App {
     const box = $("empty");
     const show = this.docs.length === 0;
     $("cellbar").style.visibility = show ? "hidden" : "visible";
+    $("toolbar").style.visibility = show ? "hidden" : "visible";
     box.hidden = !show;
     if (!show) return;
     box.textContent = "";
@@ -388,6 +394,7 @@ export class App {
       : `${name(s.r0, s.c0)}:${name(s.r1, s.c1)}`;
     if (!this.grid.editing && document.activeElement !== this.cellInput) this.cellInput.value = this.activeRaw();
     this.renderStats();
+    this.refreshToolbar();
   }
 
   private activeRaw(): string {
@@ -424,10 +431,114 @@ export class App {
     const t = this.theme();
     const dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
     document.documentElement.dataset.theme = dark ? "dark" : "light";
-    $("theme-btn").innerHTML = dark
-      ? '<svg viewBox="0 0 16 16" width="15" height="15"><path d="M13 9.6A5.5 5.5 0 0 1 6.4 3 5.5 5.5 0 1 0 13 9.6Z" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linejoin="round"/></svg>'
-      : '<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+    document.querySelectorAll<HTMLElement>("#theme-toggle button").forEach((b) => {
+      const on = b.dataset.themeOpt === t;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-checked", String(on));
+    });
+    windowControls.setBackground(getComputedStyle(document.documentElement).getPropertyValue("--bg").trim());
     this.grid.readColors();
+  }
+
+  /* -------------------------------- zoom -------------------------------- */
+
+  private setZoom(z: number) {
+    z = Math.min(2, Math.max(0.5, Math.round(z * 100) / 100));
+    localStorage.setItem("bento.zoom", String(z));
+    this.grid.setZoom(z);
+    this.refreshToolbar();
+  }
+
+  private stepZoom(dir: 1 | -1) {
+    const z = this.grid.zoom;
+    const next = dir > 0 ? ZOOMS.find((v) => v > z + 0.001) : [...ZOOMS].reverse().find((v) => v < z - 0.001);
+    if (next) this.setZoom(next);
+  }
+
+  /* ------------------------------- toolbar ------------------------------- */
+
+  private buildToolbar() {
+    const bar = $("toolbar");
+    const t = (key: string, b: ToolButton) => { this.tools[key] = b; return b.el; };
+    const withDoc = (fn: (d: Doc) => void) => () => { const d = this.active; if (d && d.loading === null) fn(d); };
+    const col = () => this.active!.sel.ac;
+    bar.append(
+      t("undo", toolButton({ icon: "undo", title: "Undo (Ctrl+Z)", onClick: withDoc((d) => this.grid.applyUndo(d.undo())) })),
+      t("redo", toolButton({ icon: "redo", title: "Redo (Ctrl+Y)", onClick: withDoc((d) => this.grid.applyUndo(d.redo())) })),
+      divider(),
+      t("zoom", toolButton({ text: "100%", caret: true, title: "Zoom (Ctrl+= / Ctrl+-)", onClick: (b) => {
+        const r = b.getBoundingClientRect();
+        b.classList.add("open");
+        showMenu(ZOOMS.map((z) => ({ label: `${Math.round(z * 100)}%`, checked: Math.abs(this.grid.zoom - z) < 0.001, action: () => this.setZoom(z) })),
+          r.left, r.bottom + 4, () => b.classList.remove("open"));
+      } })),
+      divider(),
+      t("sortAsc", toolButton({ icon: "sortAsc", title: "Sort column A → Z", onClick: withDoc((d) => { d.sortBy(col(), false); this.afterStructure(); }) })),
+      t("sortDesc", toolButton({ icon: "sortDesc", title: "Sort column Z → A", onClick: withDoc((d) => { d.sortBy(col(), true); this.afterStructure(); }) })),
+      t("filter", toolButton({ icon: "filter", title: "Filter column", onClick: (b) => withDoc((d) => {
+        const r = b.getBoundingClientRect();
+        openFilter(d, col(), r.left, r.bottom + 4, () => this.afterStructure());
+      })() })),
+      t("freeze", toolButton({ icon: "freeze", title: "Freeze header row", onClick: withDoc(() => this.toggleFreeze()) })),
+      divider(),
+      t("insRow", toolButton({ icon: "insertRow", title: "Insert row above", onClick: withDoc(() => runItem(this.rowItems()[0])) })),
+      t("insCol", toolButton({ icon: "insertCol", title: "Insert column left", onClick: withDoc(() => runItem(this.colItems()[0])) })),
+      t("delRow", toolButton({ icon: "deleteRow", title: "Delete row", onClick: withDoc(() => runItem(this.rowItems()[2])) })),
+      t("delCol", toolButton({ icon: "deleteCol", title: "Delete column", onClick: withDoc(() => runItem(this.colItems()[2])) })),
+      t("fit", toolButton({ icon: "fitWidth", title: "Fit column width to content", onClick: withDoc((d) => {
+        const s = selRect(d.sel);
+        for (let c = s.c0; c <= s.c1; c++) this.grid.autoFit(c);
+      }) })),
+      divider(),
+      t("sum", toolButton({ icon: "sum", caret: true, title: "Functions", onClick: (b) => {
+        if (!this.active) return;
+        const r = b.getBoundingClientRect();
+        b.classList.add("open");
+        showMenu(["SUM", "AVERAGE", "COUNT", "MIN", "MAX"].map((f) => ({ label: f[0] + f.slice(1).toLowerCase(), key: f, action: () => this.autoSum(f) })),
+          r.left, r.bottom + 4, () => b.classList.remove("open"));
+      } })),
+      grow(),
+      t("find", toolButton({ icon: "search", title: "Find and replace (Ctrl+F)", onClick: withDoc(() => (this.find.isOpen ? this.find.close() : this.find.open(false))) })),
+    );
+    const z = Number(localStorage.getItem("bento.zoom"));
+    if (z) this.grid.setZoom(z);
+  }
+
+  private refreshToolbar() {
+    const d = this.active;
+    const ready = !!d && d.loading === null;
+    for (const b of Object.values(this.tools)) b.set({ disabled: !ready });
+    this.tools.zoom.set({ disabled: false, text: `${Math.round(this.grid.zoom * 100)}%` });
+    if (!ready || !d) return;
+    this.tools.undo.set({ disabled: !d.canUndo });
+    this.tools.redo.set({ disabled: !d.canRedo });
+    this.tools.filter.set({ on: d.filters.has(d.sel.ac) });
+    this.tools.freeze.set({ on: d.freezeHeader });
+  }
+
+  /**
+   * Σ: with a range of cells selected, put the formula in the cell just
+   * below it; with one cell, start a formula there for you to finish.
+   */
+  private autoSum(fn: string) {
+    const d = this.active;
+    if (!d) return;
+    if (this.grid.editing) this.grid.commitEdit();
+    const s = selRect(d.sel);
+    if (s.r0 === s.r1 && s.c0 === s.c1) {
+      this.grid.startEdit("edit", `=${fn}(`);
+      return;
+    }
+    const cells: { r: number; c: number; v: string }[] = [];
+    const below = s.r1 + 1;
+    const top = d.dataRow(s.r0) + 1;
+    const bottom = d.dataRow(s.r1) + 1;
+    for (let c = s.c0; c <= s.c1; c++) {
+      cells.push({ r: d.dataRow(below), c, v: `=${fn}(${colName(c)}${top}:${colName(c)}${bottom})` });
+    }
+    d.setCells(cells, fn);
+    this.grid.select({ ar: below, ac: s.c0, fr: below, fc: s.c1 });
+    this.onChange();
   }
 
   /* -------------------------------- menus -------------------------------- */
@@ -640,20 +751,23 @@ export class App {
   private bindChrome() {
     $("menu-btn").addEventListener("click", () => this.appMenu());
     $("new-tab").addEventListener("click", () => this.newDoc());
-    $("find-btn").addEventListener("click", () => this.active && (this.find.isOpen ? this.find.close() : this.find.open(false)));
-    $("theme-btn").addEventListener("click", () => {
-      const r = $("theme-btn").getBoundingClientRect();
-      const t = this.theme();
-      showMenu([
-        { label: "Match Windows", checked: t === "system", action: () => this.setTheme("system") },
-        { label: "Light", checked: t === "light", action: () => this.setTheme("light") },
-        { label: "Dark", checked: t === "dark", action: () => this.setTheme("dark") },
-      ], r.right - 200, r.bottom + 4);
+    document.querySelectorAll<HTMLElement>("#theme-toggle button").forEach((b) => {
+      b.addEventListener("pointerdown", (e) => e.preventDefault());
+      b.addEventListener("click", () => this.setTheme(b.dataset.themeOpt as Theme));
     });
     matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => this.applyTheme());
     $("win-min").addEventListener("click", () => windowControls.minimize());
     $("win-max").addEventListener("click", () => windowControls.toggleMaximize());
     $("win-close").addEventListener("click", () => windowControls.close());
+    const syncMax = async () => {
+      const max = await windowControls.isMaximized();
+      $("win-max").title = max ? "Restore" : "Maximise";
+      $("win-max").innerHTML = max
+        ? '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="3.5" y="5.5" width="7" height="7" rx="1.5"/><path d="M6 3.5h4.75a1.75 1.75 0 0 1 1.75 1.75V10"/></svg>'
+        : '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="3.5" y="3.5" width="9" height="9" rx="1.75"/></svg>';
+    };
+    windowControls.onResized(() => { syncMax(); });
+    syncMax();
     $("titlebar").addEventListener("dblclick", (e) => {
       if ((e.target as HTMLElement).hasAttribute("data-tauri-drag-region")) windowControls.toggleMaximize();
     });
@@ -699,6 +813,9 @@ export class App {
           this.activate(this.docs[(i + (e.shiftKey ? -1 : 1) + this.docs.length) % this.docs.length]);
         }
       }
+      else if (ctrl && (e.key === "=" || e.key === "+")) { e.preventDefault(); this.stepZoom(1); }
+      else if (ctrl && e.key === "-") { e.preventDefault(); this.stepZoom(-1); }
+      else if (ctrl && e.key === "0") { e.preventDefault(); this.setZoom(1); }
       else if (e.key === "F1") { e.preventDefault(); this.shortcuts(); }
       else if (e.key === "Escape" && this.find.isOpen && document.activeElement === this.grid.sink) { this.find.close(); }
       else if (d && document.activeElement === document.body && !ctrl && !e.altKey) {
@@ -714,7 +831,17 @@ export class App {
       });
     });
     window.addEventListener("blur", () => closeMenus());
+    // Ctrl + mouse wheel zooms the grid.
+    $("grid-wrap").addEventListener("wheel", (e) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      this.stepZoom(e.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
   }
+}
+
+function runItem(it: MenuItem) {
+  if (typeof it === "object" && "label" in it) it.action?.();
 }
 
 const LOGO = `<rect x="2" y="2" width="20" height="20" rx="5" fill="var(--accent)"/><rect x="5.2" y="5.2" width="6.2" height="13.6" rx="1.6" fill="var(--on-accent)"/><rect x="12.6" y="5.2" width="6.2" height="6.2" rx="1.6" fill="var(--on-accent)"/><rect x="12.6" y="12.6" width="6.2" height="6.2" rx="1.6" fill="var(--on-accent)" opacity=".55"/>`;

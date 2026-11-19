@@ -118,6 +118,15 @@ export const windowControls = {
   async setTitle(t: string) { if (isTauri) (await win()).setTitle(t); else document.title = t; },
   async isMaximized() { return isTauri ? (await win()).isMaximized() : false; },
   async onResized(cb: () => void) { if (isTauri) (await win()).onResized(cb); },
+  /** Paint behind the page too, so resizing never flashes black at the edges. */
+  async setBackground(hex: string) {
+    if (!isTauri) return;
+    try {
+      (await win()).setBackgroundColor(hex);
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      await getCurrentWebview().setBackgroundColor(hex);
+    } catch (e) { console.warn(e); }
+  },
   async onCloseRequested(cb: () => Promise<boolean>) {
     if (isTauri) {
       (await win()).onCloseRequested(async (e) => {

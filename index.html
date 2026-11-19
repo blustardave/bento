@@ -26,23 +26,23 @@
         </button>
         <div id="tabs"></div>
         <button id="new-tab" class="icon-btn" title="New sheet (Ctrl+N)">
-          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>
+          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 3.5v9M3.5 8h9"/></svg>
         </button>
         <div class="drag-fill" data-tauri-drag-region></div>
         <button id="update-btn" class="update-pill" hidden title="A new version of Bento is ready">Update ready · Restart</button>
-        <div class="actions">
-          <button id="find-btn" class="icon-btn" title="Find (Ctrl+F)">
-            <svg viewBox="0 0 16 16" width="15" height="15"><circle cx="7" cy="7" r="4.25" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M10.2 10.2 13.5 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-          </button>
-          <button id="theme-btn" class="icon-btn" title="Theme"></button>
+        <div id="theme-toggle" class="segmented" role="radiogroup" aria-label="Theme">
+          <button data-theme-opt="system" title="Match Windows" role="radio"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M6 14h4M8 11.5V14"/></svg></button>
+          <button data-theme-opt="light" title="Light" role="radio"><svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="8" r="2.75"/><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.05 1.05M11.35 11.35l1.05 1.05M3.6 12.4l1.05-1.05M11.35 4.65l1.05-1.05"/></svg></button>
+          <button data-theme-opt="dark" title="Dark" role="radio"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M13.25 9.6A5.5 5.5 0 0 1 6.4 2.75a5.5 5.5 0 1 0 6.85 6.85Z"/></svg></button>
         </div>
         <div class="winctl">
-          <button id="win-min" title="Minimise"><svg viewBox="0 0 10 10" width="10" height="10"><path d="M1 5h8" stroke="currentColor" stroke-width="1"/></svg></button>
-          <button id="win-max" title="Maximise"><svg viewBox="0 0 10 10" width="10" height="10"><rect x="1.5" y="1.5" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1" fill="none"/></svg></button>
-          <button id="win-close" title="Close"><svg viewBox="0 0 10 10" width="10" height="10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.1"/></svg></button>
+          <button id="win-min" title="Minimise"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M3.5 8h9"/></svg></button>
+          <button id="win-max" title="Maximise"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="3.5" y="3.5" width="9" height="9" rx="1.75"/></svg></button>
+          <button id="win-close" title="Close"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4.25 4.25l7.5 7.5M11.75 4.25l-7.5 7.5"/></svg></button>
         </div>
       </header>
       <div id="progress"><div></div></div>
+      <div id="toolbar" role="toolbar" aria-label="Sheet tools"></div>
 
       <div id="cellbar">
         <div id="cell-name">A1</div>

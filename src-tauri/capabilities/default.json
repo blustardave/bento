@@ -16,6 +16,8 @@
     "core:window:allow-set-title",
     "dialog:default",
     "updater:default",
-    "core:app:allow-version"
+    "core:app:allow-version",
+    "core:window:allow-set-background-color",
+    "core:webview:allow-set-webview-background-color"
   ]
 }

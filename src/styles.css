@@ -31,24 +31,24 @@
 }
 
 [data-theme="dark"] {
-  --bg: #1f1e1d;
-  --surface: #262624;
-  --surface-2: #30302d;
-  --raised: #2b2a28;
-  --line: #2f2e2c;
-  --line-strong: #3d3c38;
+  --bg: #262624;
+  --surface: #2d2c2a;
+  --surface-2: #383733;
+  --raised: #32312e;
+  --line: #363532;
+  --line-strong: #45443f;
   --text: #ecebe4;
-  --text-2: #bdbbb3;
-  --muted: #8a8880;
+  --text-2: #c2c0b7;
+  --muted: #918f86;
   --accent: #e08a6d;
   --accent-text: #eb9a7e;
-  --accent-soft: rgba(224, 138, 109, 0.15);
+  --accent-soft: rgba(224, 138, 109, 0.16);
   --accent-softer: rgba(224, 138, 109, 0.08);
-  --on-accent: #1f1e1d;
+  --on-accent: #262624;
   --error: #ef7a6e;
   --match: rgba(230, 180, 60, 0.22);
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.45);
-  --scrim: rgba(0, 0, 0, 0.4);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 30px rgba(0, 0, 0, 0.35);
+  --scrim: rgba(0, 0, 0, 0.35);
   color-scheme: dark;
 }
 
@@ -111,7 +111,7 @@ input, textarea { font: inherit; color: inherit; }
 .tab:hover { background: var(--surface-2); color: var(--text); }
 .tab.active { background: var(--bg); color: var(--text); box-shadow: 0 0 0 1px var(--line); }
 .tab .name { overflow: hidden; text-overflow: ellipsis; }
-.tab.active .name { font-family: var(--font-serif); font-size: 14px; }
+.tab.active .name { font-weight: 500; }
 .tab .x {
   width: 18px; height: 18px; flex: none;
   display: grid; place-items: center;
@@ -137,17 +137,78 @@ input, textarea { font: inherit; color: inherit; }
 .icon-btn.on { color: var(--accent-text); }
 
 .drag-fill { flex: 1; align-self: stretch; }
-.actions { display: flex; gap: 2px; margin-right: 6px; }
 
-.winctl { display: flex; align-self: stretch; }
+.winctl { display: flex; gap: 2px; margin: 0 6px 0 8px; }
 .winctl button {
-  width: 46px;
+  width: 32px; height: 28px;
   display: grid; place-items: center;
+  border-radius: 6px;
   color: var(--text-2);
-  transition: background var(--ease);
+  transition: background var(--ease), color var(--ease);
 }
-.winctl button:hover { background: var(--surface-2); }
+.winctl button:hover { background: var(--surface-2); color: var(--text); }
 #win-close:hover { background: #c42b1c; color: #fff; }
+
+/* One icon style everywhere: 16px grid, 1.4px rounded strokes. */
+.ico svg, .segmented svg, .winctl svg, #new-tab svg, #toolbar svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.segmented button {
+  width: 26px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  color: var(--muted);
+  transition: background var(--ease), color var(--ease), box-shadow var(--ease);
+}
+.segmented button:hover { color: var(--text); }
+.segmented button.on {
+  color: var(--text);
+  background: var(--raised);
+  box-shadow: 0 0 0 1px var(--line-strong), 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* ------------------------------- toolbar ------------------------------- */
+
+#toolbar {
+  height: 40px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+#toolbar .tb {
+  height: 28px;
+  min-width: 28px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--text-2);
+  transition: background var(--ease), color var(--ease);
+  white-space: nowrap;
+}
+#toolbar .tb:hover:not(:disabled), #toolbar .tb.open { background: var(--surface); color: var(--text); }
+#toolbar .tb:disabled { opacity: 0.35; }
+#toolbar .tb.on { color: var(--accent-text); background: var(--accent-soft); }
+#toolbar .tb .txt { font-size: 12px; font-variant-numeric: tabular-nums; }
+#toolbar .tb .caret { width: 8px; height: 8px; opacity: 0.7; }
+#toolbar .div { width: 1px; height: 18px; background: var(--line-strong); margin: 0 6px; flex: none; }
+#toolbar .grow { flex: 1; }
 
 #progress { height: 2px; flex: none; background: transparent; position: relative; overflow: hidden; }
 #progress > div { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); transition: width 120ms linear; }
