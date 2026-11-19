@@ -9,6 +9,7 @@ import {
   windowControls, writeFile,
 } from "./native";
 import { MenuItem, closeMenus, modal, showMenu, toast } from "./ui";
+import { appVersion, initUpdater } from "./updater";
 import { basename, cellName, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 
 type Theme = "system" | "light" | "dark";
@@ -47,6 +48,17 @@ export class App {
     );
     onOpenFiles((paths) => this.open(paths.map((p) => ({ name: basename(p), path: p }))));
     windowControls.onCloseRequested(() => this.confirmQuit());
+    initUpdater((version, install) => {
+      const btn = $("update-btn");
+      btn.hidden = false;
+      btn.title = `Bento ${version} is ready to install`;
+      btn.onclick = async () => {
+        // Give unsaved work a chance to be saved first.
+        if (!(await this.confirmQuit())) return;
+        btn.textContent = "Updating…";
+        try { await install(); } catch (e) { toast(`Update failed: ${e}`, true); btn.textContent = "Update ready · Restart"; }
+      };
+    });
     const files = await launchFiles();
     if (files.length) this.open(files.map((p) => ({ name: basename(p), path: p })));
   }
@@ -443,7 +455,7 @@ export class App {
       { label: "Unhide all columns", disabled: !d?.hidden.size, action: () => { d!.hidden.clear(); this.onChange(); } },
       "sep",
       { label: "Keyboard shortcuts", key: "F1", action: () => this.shortcuts() },
-      { label: "About Bento", action: () => modal("Bento", "Version 0.1.0\nA minimal, fast CSV editor.", [{ label: "Close", value: true, primary: true }]) },
+      { label: "About Bento", action: async () => modal("Bento", `Version ${await appVersion()}\nA minimal, fast CSV editor.\nUpdates install automatically.`, [{ label: "Close", value: true, primary: true }]) },
     ];
     showMenu(items, r.left, r.bottom + 4, () => btn.classList.remove("open"));
   }

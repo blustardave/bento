@@ -12,9 +12,32 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - name: Check the update-signing key is set
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::Add the TAURI_SIGNING_PRIVATE_KEY secret: repo Settings → Secrets and variables → Actions → New repository secret"
+            exit 1
+          fi
+
+      # Every build gets a higher version number, so installed copies
+      # know there's something newer to update to.
+      - name: Set version to 0.1.${{ github.run_number }}
+        shell: bash
+        run: |
+          node -e "
+            const fs = require('fs');
+            const f = 'src-tauri/tauri.conf.json';
+            const c = JSON.parse(fs.readFileSync(f, 'utf8'));
+            c.version = '0.1.${{ github.run_number }}';
+            fs.writeFileSync(f, JSON.stringify(c, null, 2));
+          "
+
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -27,15 +50,22 @@ jobs:
 
       - run: npm ci
 
+      - run: npm test
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: build-${{ github.run_number }}
-          releaseName: "Bento — build ${{ github.run_number }}"
+          releaseName: "Bento 0.1.${{ github.run_number }}"
           releaseBody: |
-            Download **Bento_x.x.x_x64-setup.exe** below, run it, and Bento will install for your user (no admin needed).
+            **New here?** Download **Bento_0.1.${{ github.run_number }}_x64-setup.exe** below and run it.
+
+            **Already have Bento?** You don't need to download anything — it updates itself. Look for "Update ready" in the title bar.
 
             Built from commit ${{ github.sha }}.
           releaseDraft: false
           prerelease: false
+          includeUpdaterJson: true

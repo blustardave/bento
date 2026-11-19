@@ -448,3 +448,17 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 }
 .toast.error { background: var(--error); color: #fff; }
 .modal p { white-space: pre-line; }
+
+.update-pill {
+  height: 24px;
+  padding: 0 11px;
+  margin-right: 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  transition: background var(--ease);
+  white-space: nowrap;
+  animation: pop var(--ease);
+}
+.update-pill:hover { background: var(--accent); color: var(--on-accent); }

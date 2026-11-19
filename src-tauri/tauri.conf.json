@@ -24,11 +24,15 @@
         "dragDropEnabled": true
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -37,11 +41,39 @@
     ],
     "shortDescription": "A minimal, fast CSV editor",
     "fileAssociations": [
-      { "ext": ["csv"], "name": "CSV file", "description": "Comma-separated values", "role": "Editor" },
-      { "ext": ["tsv"], "name": "TSV file", "description": "Tab-separated values", "role": "Editor" }
+      {
+        "ext": [
+          "csv"
+        ],
+        "name": "CSV file",
+        "description": "Comma-separated values",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "tsv"
+        ],
+        "name": "TSV file",
+        "description": "Tab-separated values",
+        "role": "Editor"
+      }
     ],
     "windows": {
-      "nsis": { "installMode": "currentUser" }
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVBODQyMTRENzhGNzMwRUQKUldUdE1QZDRUU0dFV2d0RG9YbGVSRzZaNldXMDF3ZXBTajlUK2d6aTNEV2VyZnMyWTlmdW5QMFcK",
+      "endpoints": [
+        "https://github.com/blustardave/bento/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }
