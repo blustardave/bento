@@ -1206,3 +1206,11 @@ input.switch:focus-visible { outline: 2px solid var(--accent-soft); outline-offs
 .accent-swatch.custom:not(.on) { background: conic-gradient(from 90deg, #d97757, #c9922e, #6c8c55, #3d968d, #4f86c6, #8c68b0, #c9617f, #d97757); }
 .accent-picker { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
 .accent-wrap { position: relative; }
+
+/* Every tab has its arrow, so tabs don't change width when picked; it only works on the open one. */
+.sheet-tab { padding-right: 8px; }
+.sheet-tab:not(.active) .caret { opacity: 0.3; pointer-events: none; }
+/* Reserve the bold width so a tab doesn't grow when it becomes the open one. */
+.sheet-tab .label { display: inline-flex; flex-direction: column; }
+.sheet-tab .label::after { content: attr(data-text); font-weight: 600; height: 0; visibility: hidden; overflow: hidden; }
+.sheet-tab.renaming .label::after { content: none; }

@@ -641,7 +641,7 @@ export class App {
       const lock = s.protected ? el("span", { class: "lock", title: "Protected" }) : null;
       if (lock) lock.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11"><rect x="4" y="7" width="8" height="6" rx="1.25"/><path d="M5.75 7V5.5a2.25 2.25 0 0 1 4.5 0V7"/></svg>';
       const tab = el("button", { class: "sheet-tab" + (s === d ? " active" : "") + (s.tabColor ? " coloured" : ""), "data-sheet": String(i), title: s.sheetName },
-        lock, el("span", { class: "label", text: s.sheetName }), s === d ? caret : null);
+        lock, el("span", { class: "label", text: s.sheetName, "data-text": s.sheetName }), caret);
       const bg = resolveColor(s.tabColor, theme);
       if (bg) tab.style.background = bg;
       // Click to switch; hold or drag to lift the tab and slide it into place,
