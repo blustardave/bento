@@ -380,6 +380,17 @@ export class Engine implements EngineLike {
     try { return normalize(this.ev(n, null, r, c)); } catch (e) { return isErr(e) ? e : ERR.parse; }
   }
 
+  /** What a formula being typed would give, as short text for a preview ("" if it doesn't parse yet). */
+  preview(src: string, r: number, c: number): string {
+    if (src.length < 2) return "";
+    let ast: Node;
+    try { ast = parse(src.slice(1)); } catch { return ""; }
+    if (ast.k === "lit" && typeof ast.v !== "object") return "";
+    const v = this.evalPart(ast, r, c);
+    if (isArr(v)) { const h = v.v.length, w = v.v[0]?.length ?? 0; return `${this.show(v.v[0][0], null)}${h * w > 1 ? `  … ${h}×${w}` : ""}`; }
+    return this.show(v, null);
+  }
+
   /** Every reference in some formula text, with where it sits. */
   static references(src: string): RefInfo[] {
     if (!src.startsWith("=")) return [];

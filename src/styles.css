@@ -1214,3 +1214,30 @@ input.switch:focus-visible { outline: 2px solid var(--accent-soft); outline-offs
 .sheet-tab .label { display: inline-flex; flex-direction: column; }
 .sheet-tab .label::after { content: attr(data-text); font-weight: 600; height: 0; visibility: hidden; overflow: hidden; }
 .sheet-tab.renaming .label::after { content: none; }
+
+/* ------------------------------ formula mode ------------------------------ */
+
+#editor.formula { color: transparent; background: transparent; caret-color: var(--text); text-align: left; }
+#editor.formula::selection { background: var(--accent-soft); color: transparent; }
+#editor-hl {
+  position: absolute; z-index: 2; pointer-events: none;
+  margin: 0;
+  border: 2px solid transparent; border-radius: 2px;
+  background: var(--raised);
+  color: var(--text);
+  white-space: pre; overflow: hidden;
+}
+#editor-hl .hl-str { color: #2f7d4a; }
+#editor-hl .hl-num { color: #2f5fb3; }
+#editor-hl .hl-err { color: var(--error); }
+#editor-hl .hl-name { color: var(--accent-text); }
+[data-theme="dark"] #editor-hl .hl-str, [data-theme="dusk"] #editor-hl .hl-str { color: #8ccf9f; }
+[data-theme="dark"] #editor-hl .hl-num, [data-theme="dusk"] #editor-hl .hl-num { color: #8fb6ef; }
+#editor-preview {
+  position: absolute; z-index: 4; pointer-events: none;
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 2px 8px; border-radius: 5px;
+  background: var(--raised); color: var(--text-2);
+  box-shadow: var(--shadow), 0 0 0 1px var(--line);
+  font: 12px var(--font-ui); font-variant-numeric: tabular-nums;
+}

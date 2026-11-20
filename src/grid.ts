@@ -1,6 +1,7 @@
 import { fromTSV, toTSV } from "./csv";
 import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, allRects, selRect } from "./doc";
 import { Engine, offsetFormula } from "./formula";
+import { tokenize, type Tok } from "./fcore";
 import { fillValues } from "./fill";
 import { DEFAULT_FONT, DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
 import { clamp, colName, parseNum } from "./util";
@@ -80,6 +81,37 @@ export type PasteMode = "normal" | "values" | "format" | "plain" | "transpose";
 function prefNumber(key: string, fallback: number): number {
   const v = Number(localStorage.getItem(key));
   return localStorage.getItem(key) !== null && Number.isFinite(v) ? v : fallback;
+}
+
+/** The formula as HTML with references coloured (same colours as the boxes on the grid). */
+function highlightFormula(text: string): string {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  let toks: Tok[];
+  try { toks = tokenize(text.slice(1)); } catch { return esc(text); }
+  let out = "=";
+  let last = 0;
+  const body = text.slice(1);
+  let ci = 0;
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    out += esc(body.slice(last, t.s));
+    let span = body.slice(t.s, t.e);
+    let cls = "";
+    let color = "";
+    if (t.t === "ref" || t.t === "cols" || t.t === "rows") {
+      color = REF_COLORS[ci++ % REF_COLORS.length];
+      // A1:B5 is one reference, one colour.
+      const nx = toks[i + 1], b = toks[i + 2];
+      if (t.t === "ref" && nx?.t === "op" && nx.v === ":" && b?.t === "ref" && !b.sh) { span = body.slice(t.s, b.e); i += 2; last = b.e; out += `<span style="color:${color}">${esc(span)}</span>`; continue; }
+    } else if (t.t === "str") cls = "hl-str";
+    else if (t.t === "num") cls = "hl-num";
+    else if (t.t === "err") cls = "hl-err";
+    else if (t.t === "id" && body[t.e] === "(") cls = "hl-fn";
+    else if (t.t === "id") cls = t.v === "TRUE" || t.v === "FALSE" ? "hl-num" : "hl-name";
+    out += color ? `<span style="color:${color}">${esc(span)}</span>` : cls ? `<span class="${cls}">${esc(span)}</span>` : esc(span);
+    last = t.e;
+  }
+  return out + esc(body.slice(last));
 }
 
 const REF_COLORS = ["#4f86c6", "#d97757", "#6c8c55", "#9b7bb8", "#c9922e", "#3d968d", "#c9617f"];
@@ -588,10 +620,12 @@ export class Grid {
     const ctx = this.ctx;
     let max = 0;
     for (let c = 0; c < Math.max(st.length, row.length); c++) {
-      const v = row[c];
+      let v = row[c];
+      // A formula's own line breaks are just layout: what counts is its result.
+      if (v && v.charCodeAt(0) === 61) v = d.display(r, c);
       // Line breaks make a row taller even without any formatting.
       if (!st[c] && v && v.includes("\n")) {
-        max = Math.max(max, v.split("\n").length * Math.round(ptToPx(DEFAULT_SIZE) * 1.35) + 8);
+        max = Math.max(max, v.split("\n").length * Math.round(ptToPx(DEFAULT_SIZE) * 1.35) + 4);
         continue;
       }
       if (!st[c]) continue;
@@ -607,8 +641,9 @@ export class Grid {
         max = Math.max(max, h);
         continue;
       }
-      if (s.wrap !== "wrap" && raw && raw.includes("\n") && !s.rot) {
-        lines = raw.split("\n").length;
+      const shown = raw && raw.charCodeAt(0) === 61 ? d.display(r, c) : raw;
+      if (s.wrap !== "wrap" && shown && shown.includes("\n") && !s.rot) {
+        lines = shown.split("\n").length;
       } else if (s.wrap === "wrap" && raw) {
         ctx.font = this.cellFont(s, r === 0 && d.freezeHeader, 1);
         lines = this.wrapLines(this.cellText(r, c, raw, s, d).text, d.width(c) - BASE_PAD * 2).length;
@@ -2008,19 +2043,8 @@ export class Grid {
     const raw = d.raw(d.dataRow(ar), ac);
     this.editor.value = initial ?? raw;
     this.editor.style.display = "block";
-    // The editor takes on the cell's look, so typing feels in place.
-    const dr = d.dataRow(ar);
-    const s = d.style(dr, ac);
-    const px = ptToPx(s.size ?? DEFAULT_SIZE) * this.zoom;
-    const es = this.editor.style;
-    es.font = this.cellFont(s, ar === 0 && d.freezeHeader);
-    es.lineHeight = Math.round(px * 1.35) + "px";
-    es.padding = `${Math.max(2, Math.round((this.rh - px * 1.35) / 2) - 2)}px ${this.pad - 1}px`;
-    es.color = resolveColor(s.color, this.theme) ?? "";
-    es.textDecoration = [s.u ? "underline" : "", s.s ? "line-through" : ""].join(" ").trim() || "none";
-    es.textAlign = s.ha === "c" ? "center" : s.ha === "r" ? "right" : "left";
-    es.whiteSpace = s.wrap === "wrap" ? "pre-wrap" : "pre";
-    this.editorWraps = s.wrap === "wrap";
+    this.formulaLook = null;
+    this.styleEditor();
     this.placeEditor();
     if (focusEditor) {
       this.editor.focus({ preventScroll: true });
@@ -2029,6 +2053,81 @@ export class Grid {
     }
     this.hooks.onEditText(this.editor.value);
     this.invalidate();
+  }
+
+  /** null until styled; then whether the editor is in formula mode. */
+  private formulaLook: boolean | null = null;
+
+  /**
+   * The editor takes on the cell's look, so typing feels in place — except
+   * for formulas (text starting with "="), which get a code look: left
+   * aligned, monospaced, with coloured references, like Sheets.
+   */
+  private styleEditor() {
+    const d = this.doc, e = this.editing;
+    if (!d || !e) return;
+    const formula = this.editor.value.startsWith("=");
+    if (formula === this.formulaLook) return;
+    this.formulaLook = formula;
+    const es = this.editor.style;
+    const z = this.zoom;
+    this.editor.classList.toggle("formula", formula);
+    if (formula) {
+      const px = 13 * z;
+      es.font = `${px}px "Cascadia Mono", "Cascadia Code", Consolas, "Courier New", monospace`;
+      es.lineHeight = Math.round(px * 1.45) + "px";
+      es.padding = `${Math.max(2, Math.round((this.rh - px * 1.45) / 2) - 2)}px ${this.pad - 1}px`;
+      es.color = "";
+      es.textDecoration = "none";
+      es.textAlign = "left";
+      es.whiteSpace = "pre";
+      this.editorWraps = false;
+    } else {
+      const s = d.style(d.dataRow(e.r), e.c);
+      const px = ptToPx(s.size ?? DEFAULT_SIZE) * z;
+      es.font = this.cellFont(s, e.r === 0 && d.freezeHeader);
+      es.lineHeight = Math.round(px * 1.35) + "px";
+      es.padding = `${Math.max(2, Math.round((this.rh - px * 1.35) / 2) - 2)}px ${this.pad - 1}px`;
+      es.color = resolveColor(s.color, this.theme) ?? "";
+      es.textDecoration = [s.u ? "underline" : "", s.s ? "line-through" : ""].join(" ").trim() || "none";
+      es.textAlign = s.ha === "c" ? "center" : s.ha === "r" ? "right" : "left";
+      es.whiteSpace = s.wrap === "wrap" ? "pre-wrap" : "pre";
+      this.editorWraps = s.wrap === "wrap";
+    }
+  }
+
+  /** Coloured copy of the formula drawn under the (see-through) editor text, and a live result. */
+  private hl: HTMLElement | null = null;
+  private preview: HTMLElement | null = null;
+
+  private paintFormula() {
+    const on = !!this.editing && this.editor.value.startsWith("=") && this.editor.style.visibility !== "hidden";
+    if (!this.hl) {
+      this.hl = document.createElement("div");
+      this.hl.id = "editor-hl";
+      this.preview = document.createElement("div");
+      this.preview.id = "editor-preview";
+      this.wrap.append(this.hl, this.preview);
+    }
+    const hl = this.hl, pv = this.preview!;
+    hl.hidden = !on;
+    if (!on) { pv.hidden = true; return; }
+    const es = this.editor.style;
+    Object.assign(hl.style, { left: es.left, top: es.top, width: es.width, height: es.height, font: es.font, lineHeight: es.lineHeight, padding: es.padding });
+    hl.innerHTML = highlightFormula(this.editor.value) + "\n";
+    hl.scrollTop = this.editor.scrollTop;
+    hl.scrollLeft = this.editor.scrollLeft;
+    // The answer so far, in a little chip above the editor.
+    const d = this.doc!, e = this.editing!;
+    let text = "";
+    try {
+      const v = d.engine.preview(this.editor.value, d.dataRow(e.r), e.c);
+      text = v;
+    } catch { text = ""; }
+    pv.hidden = text === "";
+    pv.textContent = text;
+    pv.style.left = es.left;
+    pv.style.top = `${parseFloat(es.top) - 24}px`;
   }
 
   /** Commit the edit, then optionally move the selection. */
@@ -2125,6 +2224,8 @@ export class Grid {
     this.ac = null;
     this.editing = null;
     this.editor.style.display = "none";
+    this.editor.classList.remove("formula");
+    this.paintFormula();
     this.hooks.onEditText(null);
     this.focus();
     this.invalidate();
@@ -2154,12 +2255,14 @@ export class Grid {
     Object.assign(this.editor.style, {
       left: x - 2 + "px", top: y - 2 + "px", width: width + "px", height: height + "px",
     });
+    this.paintFormula();
   }
 
   /** The cell bar edits the same value; keep the in-cell editor in sync. */
   setEditorText(v: string) {
     if (!this.editing) return;
     this.editor.value = v;
+    this.styleEditor();
     this.placeEditor();
   }
 
@@ -2699,6 +2802,7 @@ export class Grid {
     this.editor.addEventListener("input", (e) => {
       if (!this.pointing) this.pointRef = null;
       this.autocomplete(e as InputEvent);
+      this.styleEditor();
       this.placeEditor();
       this.hooks.onEditText(this.editor.value);
       if (this.editor.value.startsWith("=")) this.invalidate();
