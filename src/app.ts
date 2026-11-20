@@ -528,24 +528,24 @@ export class App {
   private renameSheet(doc: Doc) {
     if (doc.protected) { toast(`"${doc.sheetName}" is protected — unprotect it first`); return; }
     const tab = document.querySelector<HTMLElement>(`.sheet-tab[data-sheet="${doc.book.sheets.indexOf(doc)}"]`);
-    if (!tab) return;
-    const input = el("input", { class: "sheet-rename", value: doc.sheetName, spellcheck: "false" }) as HTMLInputElement;
-    tab.replaceWith(input);
-    // As wide as the name, growing as you type.
-    const measure = document.createElement("canvas").getContext("2d")!;
-    const fit = () => {
-      measure.font = getComputedStyle(input).font;
-      input.style.width = `${Math.ceil(Math.max(40, measure.measureText(input.value).width + 20))}px`;
-    };
-    fit();
-    input.addEventListener("input", fit);
-    input.focus();
-    input.select();
+    const label = tab?.querySelector<HTMLElement>(".label");
+    if (!tab || !label) return;
+    // Edit the name right where it is, so nothing shifts.
+    tab.classList.add("renaming");
+    label.contentEditable = "plaintext-only";
+    if (label.contentEditable !== "plaintext-only") label.contentEditable = "true";
+    label.spellcheck = false;
+    label.focus();
+    const range = document.createRange();
+    range.selectNodeContents(label);
+    const sel = getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
     let finished = false;
     const finish = (save: boolean) => {
       if (finished) return;
       finished = true;
-      const v = input.value.trim();
+      const v = (label.textContent ?? "").replace(/\s+/g, " ").trim();
       if (save && v && v !== doc.sheetName) {
         if (doc.book.sheets.some((s) => s !== doc && s.sheetName.toLowerCase() === v.toLowerCase())) toast(`There's already a sheet called "${v}"`);
         else { doc.sheetName = v; doc.book.structureDirty = true; }
@@ -553,14 +553,14 @@ export class App {
       this.render();
       this.grid.focus();
     };
-    input.addEventListener("keydown", (e) => {
+    label.addEventListener("keydown", (e) => {
       e.stopPropagation();
       // preventDefault matters: focus returns to the grid during this key press,
       // and the Enter must not carry over into a cell.
       if (e.key === "Enter") { e.preventDefault(); finish(true); }
       else if (e.key === "Escape") { e.preventDefault(); finish(false); }
     });
-    input.addEventListener("blur", () => finish(true));
+    label.addEventListener("blur", () => finish(true));
   }
 
   private sheetMenu(doc: Doc, x: number, y: number, anchor?: HTMLElement) {
@@ -640,7 +640,7 @@ export class App {
       // Click to switch; hold or drag to lift the tab and slide it into place,
       // with its neighbours stepping aside as it passes them.
       tab.addEventListener("pointerdown", (e) => {
-        if (e.button !== 0 || caret.contains(e.target as Node)) return;
+        if (e.button !== 0 || caret.contains(e.target as Node) || tab.classList.contains("renaming")) return;
         e.preventDefault();
         const startX = e.clientX;
         let lifted = false;
@@ -717,7 +717,7 @@ export class App {
         window.addEventListener("pointercancel", up);
       });
       caret.addEventListener("click", (e) => { e.stopPropagation(); const r = tab.getBoundingClientRect(); this.sheetMenu(s, r.left, r.top, tab); });
-      tab.addEventListener("dblclick", () => this.renameSheet(s));
+      tab.addEventListener("dblclick", () => { if (!tab.classList.contains("renaming")) this.renameSheet(s); });
       tab.addEventListener("contextmenu", (e) => { e.preventDefault(); this.sheetMenu(s, e.clientX, e.clientY, tab); });
       els.push(tab);
       tabs.append(tab);

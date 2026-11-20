@@ -446,6 +446,32 @@ export function shiftFormula(src: string, axis: "row" | "col", at: number, delta
   return "=" + out + body.slice(last);
 }
 
+/** Rewrite references after rows/columns were reordered: old index → new index. */
+export function remapFormula(src: string, axis: "row" | "col", map: (i: number) => number): string {
+  if (!src.startsWith("=")) return src;
+  let toks: Tok[];
+  try { toks = tokenize(src.slice(1)); } catch { return src; }
+  const body = src.slice(1);
+  let out = "";
+  let last = 0;
+  for (const t of toks) {
+    let rep: string | null = null;
+    if (t.t === "ref") {
+      const r = axis === "row" ? map(t.r) : t.r;
+      const c = axis === "col" ? map(t.c) : t.c;
+      if (r !== t.r || c !== t.c) rep = (t.ca ? "$" : "") + colName(c) + (t.ra ? "$" : "") + (r + 1);
+    } else if (t.t === "cols" && axis === "col") {
+      const c1 = map(t.c1), c2 = map(t.c2);
+      if (c1 !== t.c1 || c2 !== t.c2) rep = (t.a1 ? "$" : "") + colName(Math.min(c1, c2)) + ":" + (t.a2 ? "$" : "") + colName(Math.max(c1, c2));
+    }
+    if (rep !== null) {
+      out += body.slice(last, t.s) + rep;
+      last = t.e;
+    }
+  }
+  return "=" + out + body.slice(last);
+}
+
 /**
  * Move a formula's relative references by (dr, dc), as when it's copied
  * to another cell. $-anchored parts stay put. Off-grid → #REF!.

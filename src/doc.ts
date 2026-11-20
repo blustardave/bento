@@ -1,6 +1,6 @@
 import { Delimiter, LineEnding, serialize } from "./csv";
 import { Encoding } from "./encoding";
-import { Engine, shiftFormula } from "./formula";
+import { Engine, remapFormula, shiftFormula } from "./formula";
 import { Style, isEmptyStyle, styleKey } from "./format";
 import { parseNum } from "./util";
 
@@ -614,6 +614,79 @@ export class Doc {
       }
     }
     return out;
+  }
+
+  /* --------------------------- moving rows / columns --------------------------- */
+
+  /** Where index i ends up when the block [from, from+n) is moved to start at `to`. */
+  static movedIndex(i: number, from: number, n: number, to: number): number {
+    if (i >= from && i < from + n) return to + (i - from);
+    let j = i >= from + n ? i - n : i;
+    if (j >= to) j += n;
+    return j;
+  }
+
+  /** Can this block move without splitting a merged cell? */
+  canMove(axis: "row" | "col", from: number, n: number, to: number): boolean {
+    const lo = Math.min(from, to), hi = Math.max(from + n, to + n) - 1;
+    return !this.merges.some((m) => {
+      const a = axis === "col" ? m.c0 : m.r0, b = axis === "col" ? m.c1 : m.r1;
+      return b >= lo && a <= hi;
+    }) && !(axis === "row" && this.filters.size);
+  }
+
+  /** Reorder columns/rows in place (no undo; see moveBlock). */
+  applyMove(axis: "row" | "col", from: number, n: number, to: number) {
+    if (from === to || n <= 0) return;
+    const map = (i: number) => Doc.movedIndex(i, from, n, to);
+    const end = Math.max(from, to) + n;
+    if (axis === "col") {
+      let longest = 0;
+      for (const row of this.rows) {
+        if (row.length > Math.min(from, to)) {
+          while (row.length < end) row.push("");
+          longest = Math.max(longest, row.length);
+          const block = row.splice(from, n);
+          row.splice(to, 0, ...block);
+        }
+        const st = this.rowStyles.get(row);
+        if (st && st.length > Math.min(from, to)) {
+          while (st.length < end) st.push(0);
+          const b = st.splice(from, n);
+          st.splice(to, 0, ...b);
+        }
+      }
+      this.cols = Math.max(this.cols, longest);
+      this.widths = new Map([...this.widths].map(([k, v]) => [map(k), v]));
+      this.hidden = new Set([...this.hidden].map(map));
+      this.filters = new Map([...this.filters].map(([k, v]) => [map(k), v]));
+    } else {
+      while (this.rows.length < end) this.rows.push(new Array(this.cols).fill(""));
+      const block = this.rows.splice(from, n);
+      this.rows.splice(to, 0, ...block);
+    }
+    for (const row of this.rows) for (let c = 0; c < row.length; c++) {
+      const v = row[c];
+      if (v.charCodeAt(0) === 61) row[c] = remapFormula(v, axis, map);
+    }
+    for (const o of this.objects) {
+      if (axis === "col") o.c = map(o.c); else o.r = map(o.r);
+      if (o.kind === "chart") o.range = remapFormula("=" + o.range, axis, map).slice(1);
+    }
+    this.refreshView();
+    this.changed();
+  }
+
+  /** Record a move that has already been shown live (state is back at the start). */
+  moveBlock(axis: "row" | "col", from: number, n: number, to: number, selAfter: Sel) {
+    if (from === to) return;
+    this.push({
+      label: axis === "col" ? "Move columns" : "Move rows",
+      selBefore: { ...this.sel },
+      selAfter,
+      run: () => this.applyMove(axis, from, n, to),
+      undo: () => this.applyMove(axis, to, n, from),
+    });
   }
 
   /** Objects below/right of inserted or deleted rows/columns move with the cells; chart ranges follow. */

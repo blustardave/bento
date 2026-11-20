@@ -50,7 +50,24 @@ type Drag =
   | { kind: "fill"; src: Rect }
   | { kind: "move"; src: Rect; grabR: number; grabC: number }
   | { kind: "freezeRows" }
-  | { kind: "freezeCols" };
+  | { kind: "freezeCols" }
+  | Reorder;
+
+/** Dragging whole selected columns/rows to a new place. */
+interface Reorder {
+  kind: "reorder";
+  axis: "col" | "row";
+  from: number; n: number; cur: number;
+  start: number;          // pointer x (cols) / y (rows) at pointerdown
+  blockStart: number;     // block's left/top on screen at pointerdown
+  blockSize: number;
+  /** Screen geometry of every visible line at pointerdown: [index, start, size]. */
+  lines: [number, number, number][];
+  before: number;         // lines before the visible window (not in the block)
+  lifted: boolean;
+  click: { zone: string; x: number; y: number };
+  ghost: HTMLCanvasElement | null;
+}
 
 interface Editing { r: number; c: number; mode: "replace" | "edit" }
 
@@ -671,6 +688,7 @@ export class Grid {
       if (fc) ctx.fillRect(bodyLeft - bar, 0, bar, h);
       else ctx.fillRect(rhw - bar, 0, bar, this.hh);
     }
+    this.drawReorderGap();
     this.drawSelectionOverlay();
     this.drawFreezePreview();
     this.hooks.onRender?.();
@@ -1121,6 +1139,151 @@ export class Grid {
     return true;
   }
 
+  /* ----------------------- dragging columns / rows ----------------------- */
+
+  /** Is (x, y) on the header of a whole column/row that's selected? */
+  private overSelectedHeader(x: number, y: number): boolean {
+    const d = this.doc;
+    if (!d || d.sel.extra?.length) return false;
+    const zone = this.zoneAt(x, y);
+    const s = selRect(d.sel);
+    if (zone === "col") { const c = this.colAt(x); return this.isWholeCols(s) && !this.isWholeRows(s) && c >= s.c0 && c <= s.c1; }
+    if (zone === "row") { const r = this.rowAt(y); return this.isWholeRows(s) && !this.isWholeCols(s) && r >= s.r0 && r <= s.r1 && !d.view; }
+    return false;
+  }
+
+  private startReorder(zone: string, x: number, y: number): boolean {
+    const d = this.doc!;
+    if (!this.overSelectedHeader(x, y)) return false;
+    const s = selRect(d.sel);
+    const axis = zone === "col" ? "col" : "row";
+    const from = axis === "col" ? s.c0 : s.r0;
+    const n = axis === "col" ? s.c1 - s.c0 + 1 : s.r1 - s.r0 + 1;
+    const lines: [number, number, number][] = [];
+    let before = 0;
+    if (axis === "col") {
+      const vis0 = this.fcEff > 0 ? 0 : this.colAt(this.rowHeaderWidth());
+      for (let c = 0; c < vis0; c++) if (c < from || c >= from + n) before++;
+      for (let c = vis0; c < d.displayCols(); c++) {
+        const left = this.colLeft(c);
+        if (left > this.w) break;
+        lines.push([c, left, this.cw(c)]);
+      }
+    } else {
+      const vis0 = this.fb > 0 ? 0 : this.rowAt(this.bodyTop);
+      for (let r = 0; r < vis0; r++) if (r < from || r >= from + n) before++;
+      for (let r = vis0; r < d.displayRows(); r++) {
+        const top = this.rowTop(r);
+        if (top > this.h) break;
+        lines.push([r, top, this.rowH(r)]);
+      }
+    }
+    const inBlock = lines.filter(([i]) => i >= from && i < from + n);
+    if (!inBlock.length) return false;
+    const blockStart = inBlock[0][1];
+    const blockSize = inBlock.reduce((a, l) => a + l[2], 0);
+    this.drag = { kind: "reorder", axis, from, n, cur: from, start: axis === "col" ? x : y, blockStart, blockSize, lines, before, lifted: false, click: { zone, x, y }, ghost: null };
+    return true;
+  }
+
+  private updateReorder(g: Reorder, x: number, y: number) {
+    const d = this.doc!;
+    const p = g.axis === "col" ? x : y;
+    if (!g.lifted) {
+      if (Math.abs(p - g.start) < 4) return;
+      g.lifted = true;
+      g.ghost = this.makeGhost(g);
+      this.scroller.style.cursor = "grabbing";
+    }
+    const lo = g.axis === "col" ? this.rowHeaderWidth() : this.hh;
+    const hi = (g.axis === "col" ? this.w : this.h) - g.blockSize;
+    const pos = clamp(g.blockStart + p - g.start, lo, Math.max(lo, hi));
+    if (g.ghost) g.ghost.style.transform = g.axis === "col" ? `translate(${pos - g.blockStart}px, -2px)` : `translate(-2px, ${pos - g.blockStart}px)`;
+    // Lay the other lines out as if the block weren't there, then count
+    // how many the ghost's leading edge has passed.
+    const forward = pos > g.blockStart;
+    const lead = forward ? pos + g.blockSize : pos;
+    let to = g.before;
+    for (const [i, start, size] of g.lines) {
+      if (i >= g.from && i < g.from + g.n) continue;
+      const at = i > g.from ? start - g.blockSize : start;
+      if (lead > at + size / 2) to++;
+    }
+    if (to !== g.cur) {
+      if (!d.canMove(g.axis, g.from, g.n, to)) return;
+      d.applyMove(g.axis, g.cur, g.n, to);
+      g.cur = to;
+      this.selectBlock(g.axis, to, g.n);
+    }
+    this.invalidate();
+  }
+
+  private selectBlock(axis: "col" | "row", start: number, n: number) {
+    const d = this.doc!;
+    if (axis === "col") d.sel = { ar: 0, ac: start, fr: this.fullRow(), fc: start + n - 1 };
+    else d.sel = { ar: start, ac: 0, fr: start + n - 1, fc: this.fullCol() };
+    this.hooks.onSelection();
+  }
+
+  private endReorder(g: Reorder, commit: boolean) {
+    const d = this.doc!;
+    g.ghost?.remove();
+    this.scroller.style.cursor = "default";
+    this.drag = null;
+    if (!g.lifted) {
+      // A plain click on a selected header selects just that line.
+      this.pointSelect(g.click.zone as "col" | "row", g.click.x, g.click.y, false);
+      return;
+    }
+    const final = g.cur;
+    // Put things back, then record the whole move as one undo step.
+    if (final !== g.from) d.applyMove(g.axis, final, g.n, g.from);
+    if (commit && final !== g.from) {
+      this.selectBlock(g.axis, final, g.n);
+      d.moveBlock(g.axis, g.from, g.n, final, { ...d.sel });
+    } else this.selectBlock(g.axis, g.from, g.n);
+    this.invalidate();
+    this.hooks.onChange();
+  }
+
+  /** A picture of the dragged columns/rows that follows the pointer. */
+  private makeGhost(g: Reorder): HTMLCanvasElement {
+    const dpr = this.dpr;
+    const c = document.createElement("canvas");
+    c.className = "reorder-ghost";
+    const w = g.axis === "col" ? g.blockSize : this.w;
+    const h = g.axis === "col" ? this.h : g.blockSize;
+    c.width = Math.round(w * dpr);
+    c.height = Math.round(h * dpr);
+    c.style.width = `${w}px`;
+    c.style.height = `${h}px`;
+    c.style.left = `${g.axis === "col" ? g.blockStart : 0}px`;
+    c.style.top = `${g.axis === "col" ? 0 : g.blockStart}px`;
+    const sx = (g.axis === "col" ? g.blockStart : 0) * dpr, sy = (g.axis === "col" ? 0 : g.blockStart) * dpr;
+    c.getContext("2d")!.drawImage(this.canvas, sx, sy, c.width, c.height, 0, 0, c.width, c.height);
+    this.wrap.append(c);
+    return c;
+  }
+
+  /** While dragging, the block's new home shows as an empty slot. */
+  private drawReorderGap() {
+    const g = this.drag;
+    if (g?.kind !== "reorder" || !g.lifted) return;
+    const { ctx, colors: k } = this;
+    ctx.fillStyle = k.surface2;
+    if (g.axis === "col") {
+      const x = this.colLeft(g.cur);
+      let w = 0;
+      for (let c = g.cur; c < g.cur + g.n; c++) w += this.cw(c);
+      ctx.fillRect(x, 0, w, this.h);
+    } else {
+      const y = this.rowTop(g.cur);
+      let h = 0;
+      for (let r = g.cur; r < g.cur + g.n; r++) h += this.rowH(r);
+      ctx.fillRect(0, y, this.w, h);
+    }
+  }
+
   /** Data rows hidden by hand just above display row r. */
   hiddenAbove(r: number): number[] {
     const d = this.doc!;
@@ -1230,7 +1393,9 @@ export class Grid {
         const cx = x + cw - 14;
         if (this.hoverChevron) {
           ctx.fillStyle = k.surface2;
-          this.roundRect(cx - 9, 5, 18, hh - 10, 4);
+          ctx.beginPath();
+          ctx.arc(cx, hh / 2, 9, 0, Math.PI * 2);
+          ctx.fill();
         }
         ctx.strokeStyle = k.text2;
         ctx.lineWidth = 1.3;
@@ -1301,13 +1466,6 @@ export class Grid {
     ctx.lineTo(x + 4, y + 9);
     ctx.lineTo(x + 4, y + 5);
     ctx.closePath();
-    ctx.fill();
-  }
-
-  private roundRect(x: number, y: number, w: number, h: number, r: number) {
-    const ctx = this.ctx;
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, r);
     ctx.fill();
   }
 
@@ -2188,6 +2346,7 @@ export class Grid {
         this.onColumnHeaderMenu(c, rect.left + this.colLeft(c) + this.cw(c) - 24, rect.top + this.hh);
         return;
       }
+      if (!e.shiftKey && !e.ctrlKey && !e.metaKey && this.startReorder(zone, x, y)) { sc.setPointerCapture(e.pointerId); return; }
       const hit = !e.shiftKey && !e.ctrlKey && !e.metaKey ? this.widgetHit(x, y) : null;
       this.pointSelect(zone, x, y, e.shiftKey, (e.ctrlKey || e.metaKey) && !e.shiftKey);
       if (hit?.kind === "check") { this.toggleChecks([{ r: hit.r, c: hit.c }]); return; }
@@ -2207,6 +2366,7 @@ export class Grid {
         this.invalidate();
         return;
       }
+      if (drag?.kind === "reorder") { this.updateReorder(drag, x, y); return; }
       if (drag?.kind === "fill") { this.updateFillTarget(drag.src, x, y); this.invalidate(); return; }
       if (drag?.kind === "move") { this.updateMoveTarget(drag, x, y); this.invalidate(); return; }
       if (drag?.kind === "freezeRows" || drag?.kind === "freezeCols") {
@@ -2220,7 +2380,8 @@ export class Grid {
       const fz = rc < 0 || y >= this.hh ? this.freezeHit(x, y) : null;
       const onFill = this.nearFillHandle(x, y);
       const onEdge = !onFill && !fz && rc < 0 && this.onSelectionEdge(x, y);
-      sc.style.cursor = onFill ? "crosshair" : onEdge ? "move" : fz ? "grab" : rc >= 0 ? "col-resize" : "default";
+      const grabbable = !onFill && !fz && rc < 0 && this.overSelectedHeader(x, y);
+      sc.style.cursor = onFill ? "crosshair" : onEdge ? "move" : fz || grabbable ? "grab" : rc >= 0 ? "col-resize" : "default";
       if (fz !== this.hoverFreeze) { this.hoverFreeze = fz; this.invalidate(); }
       const hc = y < this.hh && x >= this.rowHeaderWidth() ? this.colAt(x) : -1;
       const chev = hc >= 0 && rc < 0 && x > this.colLeft(hc) + this.cw(hc) - 24 && this.cw(hc) > 44;
@@ -2233,6 +2394,7 @@ export class Grid {
 
     const end = (e: PointerEvent) => {
       const drag = this.drag;
+      if (drag?.kind === "reorder") this.endReorder(drag, e.type === "pointerup");
       if (drag?.kind === "resize") { this.doc?.remeasureAll(); this.hooks.onChange(); }
       if (drag?.kind === "move") {
         const t = this.moveTarget;
