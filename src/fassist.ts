@@ -3,7 +3,7 @@
  * function suggestions, the current function's arguments, and F4 to
  * cycle the $ signs of the reference at the caret.
  * ------------------------------------------------------------------ */
-import { FUNCS, FUNCTION_NAMES } from "./functions";
+import { FUNCS, FUNCTION_NAMES } from "./library";
 import { el } from "./util";
 
 type Field = HTMLInputElement | HTMLTextAreaElement;

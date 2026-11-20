@@ -8,12 +8,13 @@ import {
   at, dims, formatNumber, isArr, isErr, isLam, isMulti, isOmit, isRef, literal, lookupEnv, parse, rewriteRefs,
   scalar, toArr, toNum, toStr, compareOp, COMPARE_OPS, OMIT, dateOf, sheetPrefix, tokenize,
 } from "./fcore";
-import { FUNCS, type Ctx } from "./functions";
+import type { Ctx } from "./functions";
+import { FUNCS } from "./library";
 import { colName } from "./util";
 
 export { FErr, formatNumber };
 export type { Val };
-export { FUNCS, FUNCTION_NAMES } from "./functions";
+export { FUNCS, FUNCTION_NAMES } from "./library";
 
 export interface Host {
   raw(r: number, c: number): string;
@@ -24,6 +25,8 @@ export interface Host {
   sheet?(name: string): Engine | null;
   /** A defined name's formula text (without "="), e.g. "Sheet1!$A$2:$A$40". */
   definedName?(name: string): string | undefined;
+  /** Names of all sheets in the file, in order. */
+  sheetNames?(): string[];
   /** Every formula cell, for finding spills and dependents. */
   formulas?(): Iterable<[number, number]>;
 }
@@ -68,6 +71,7 @@ export class Engine implements EngineLike {
   }
 
   rowCount() { return Math.max(1, this.host.rowCount()); }
+  rawAt(r: number, c: number) { return this.host.raw(r, c); }
   colCount() { return Math.max(1, this.host.colCount?.() ?? 26); }
   sheetName() { return this.host.sheetName?.() ?? ""; }
 
@@ -267,9 +271,27 @@ export class Engine implements EngineLike {
       env,
       call: (l, args) => this.callLambda(l, args, r, c),
       r, c,
-      refFromText: (t) => this.refFromText(t, r, c),
+      refFromText: (t, a1 = true) => this.refFromText(t, r, c, a1),
+      sheetName: () => this.sheetName(),
+      sheetIndex: (n) => (this.host.sheetNames?.() ?? [this.sheetName()]).findIndex((x) => x.toLowerCase() === n.toLowerCase()),
+      sheetCount: () => this.host.sheetNames?.().length ?? 1,
       subRef: (ref, r1, c1, r2, c2) => r1 < 0 || c1 < 0 ? ERR.ref : { ...ref, r1, c1, r2, c2 },
     };
+  }
+
+  /** Sheet1:Sheet3!A1:B2 — the same block from every sheet in between, stacked. */
+  private threeD(from: string, to: string, r1: number, c1: number, r2: number, c2: number): Any {
+    const names = this.host.sheetNames?.() ?? [this.sheetName()];
+    const i = names.findIndex((x) => x.toLowerCase() === from.toLowerCase());
+    const j = names.findIndex((x) => x.toLowerCase() === to.toLowerCase());
+    if (i < 0 || j < 0) return ERR.ref;
+    const rows: Val[][] = [];
+    for (let k = Math.min(i, j); k <= Math.max(i, j); k++) {
+      const eng = this.sheetEngine(names[k]);
+      if (isErr(eng)) return eng;
+      rows.push(...toArr(this.rangeOf(eng, r1, c1, r2, c2)));
+    }
+    return { k: "arr", v: rows };
   }
 
   private callLambda(l: LamV, args: Any[], r: number, c: number): Any {
@@ -279,9 +301,25 @@ export class Engine implements EngineLike {
     return this.ev(l.body, env, r, c);
   }
 
-  private refFromText(text: string, r: number, c: number): RefV | FErr {
+  private refFromText(text: string, r: number, c: number, a1 = true): RefV | FErr {
     let ast: Node;
-    try { ast = parse(text.trim()); } catch { return ERR.ref; }
+    let t = text.trim();
+    if (!a1) {
+      // R1C1 style: R2C3, R[-1]C[2], RC[1] (relative to the calling cell).
+      const one = (s: string): string | null => {
+        const m = /^R(\[-?\d+\]|\d+)?C(\[-?\d+\]|\d+)?$/i.exec(s);
+        if (!m) return null;
+        const part = (p: string | undefined, here: number) => p === undefined ? here : p.startsWith("[") ? here + Number(p.slice(1, -1)) : Number(p) - 1;
+        const rr = part(m[1], r), cc = part(m[2], c);
+        return rr < 0 || cc < 0 ? null : colName(cc) + (rr + 1);
+      };
+      const bang = t.lastIndexOf("!");
+      const prefix = bang >= 0 ? t.slice(0, bang + 1) : "";
+      const parts = t.slice(bang + 1).split(":").map(one);
+      if (parts.some((p) => p === null)) return ERR.ref;
+      t = prefix + parts.join(":");
+    }
+    try { ast = parse(t); } catch { return ERR.ref; }
     if (ast.k !== "ref" && ast.k !== "range" && ast.k !== "name") return ERR.ref;
     const v = this.ev(ast, null, r, c);
     return isRef(v) ? v : ERR.ref;
@@ -305,14 +343,22 @@ export class Engine implements EngineLike {
       case "lit": return n.v;
       case "omit": return OMIT;
       case "ref": {
+        if (n.sh2) return this.threeD(n.sh!, n.sh2, n.r, n.c, n.r, n.c);
         const eng = this.sheetEngine(n.sh);
         if (isErr(eng)) return eng;
         return { k: "ref", eng, r1: n.r, c1: n.c, r2: n.r, c2: n.c };
       }
       case "range": {
+        if (n.sh2) return this.threeD(n.sh!, n.sh2, n.r1, n.c1, n.r2, n.c2);
         const eng = this.sheetEngine(n.sh);
         if (isErr(eng)) return eng;
         return this.rangeOf(eng, n.r1, n.c1, n.r2, n.c2);
+      }
+      case "union": {
+        // (A1:A3, C1:C3): every value, one after another.
+        const vals: Val[] = [];
+        for (const p of n.parts) for (const v of eachAny(this.ev(p, env, r, c))) vals.push(v);
+        return { k: "arr", v: vals.map((v) => [v]) };
       }
       case "spill": {
         const a = n.a as Extract<Node, { k: "ref" }>;
@@ -327,7 +373,8 @@ export class Engine implements EngineLike {
       case "array": return { k: "arr", v: n.rows.map((row) => row.map((x) => scalar(this.ev(x, env, r, c)))) };
       case "neg": return lift1(this.ev(n.a, env, r, c), (v) => { const x = toNum(v); return isErr(x) ? x : -x; });
       case "pct": return lift1(this.ev(n.a, env, r, c), (v) => { const x = toNum(v); return isErr(x) ? x : x / 100; });
-      case "bin": return lift2(this.ev(n.a, env, r, c), this.ev(n.b, env, r, c), (a, b) => binop(n.op, a, b));
+      case "bin": if (n.op === "∩") return intersect(this.ev(n.a, env, r, c), this.ev(n.b, env, r, c));
+        return lift2(this.ev(n.a, env, r, c), this.ev(n.b, env, r, c), (a, b) => binop(n.op, a, b));
       case "call": {
         const f = this.ev(n.callee, env, r, c);
         if (!isLam(f)) return isErr(f) ? f : ERR.value;
@@ -385,7 +432,7 @@ export class Engine implements EngineLike {
     if (src.length < 2) return "";
     let ast: Node;
     try { ast = parse(src.slice(1)); } catch { return ""; }
-    if (ast.k === "lit" && typeof ast.v !== "object") return "";
+    if ((ast.k === "lit" && typeof ast.v !== "object") || ast.k === "name") return "";
     const v = this.evalPart(ast, r, c);
     if (isArr(v)) { const h = v.v.length, w = v.v[0]?.length ?? 0; return `${this.show(v.v[0][0], null)}${h * w > 1 ? `  … ${h}×${w}` : ""}`; }
     return this.show(v, null);
@@ -454,6 +501,19 @@ function fin(v: Val): Val {
   return v;
 }
 
+function* eachAny(v: Any): Iterable<Val> {
+  if (isMulti(v)) { for (const row of toArr(v)) yield* row; }
+  else yield scalarOf(v);
+}
+
+/** The overlap of two references (A1:C5 B2:B9), or #NULL! if none. */
+function intersect(a: Any, b: Any): Any {
+  if (!isRef(a) || !isRef(b) || a.eng !== b.eng) return isErr(a) ? a : isErr(b) ? b : new FErr("#NULL!");
+  const r1 = Math.max(a.r1, b.r1), r2 = Math.min(a.r2, b.r2), c1 = Math.max(a.c1, b.c1), c2 = Math.min(a.c2, b.c2);
+  if (r1 > r2 || c1 > c2) return new FErr("#NULL!");
+  return { k: "ref", eng: a.eng, r1, c1, r2, c2 };
+}
+
 /** One cell of an array, repeating single rows/columns to fit. */
 function pickAt(a: RefV | ArrV, i: number, j: number): Val {
   const [h, w] = dims(a);
@@ -502,7 +562,7 @@ function binop(op: string, a: Val, b: Val): Val {
 /** Could this formula give an array (and so spill)? */
 export function mayArray(n: Node): boolean {
   switch (n.k) {
-    case "range": case "spill": case "array": case "name": case "call": return true;
+    case "range": case "spill": case "array": case "name": case "call": case "union": return true;
     case "lit": case "ref": case "omit": return false;
     case "paren": case "neg": case "pct": return mayArray(n.a);
     case "bin": return mayArray(n.a) || mayArray(n.b);
@@ -612,14 +672,16 @@ export function offsetFormula(src: string, dr: number, dc: number): string {
 
 /** Point references at a renamed sheet. */
 export function renameSheetInFormula(src: string, from: string, to: string): string {
+  const same = (x?: string) => !!x && x.toLowerCase() === from.toLowerCase();
   return rewriteRefs(src, (t) => {
-    if (!t.sh || t.sh.toLowerCase() !== from.toLowerCase()) return null;
+    if (!same(t.sh) && !same(t.sh2)) return null;
+    const a = same(t.sh) ? to : t.sh!, b = t.sh2 ? (same(t.sh2) ? to : t.sh2) : undefined;
     const rest = (() => {
       if (t.t === "ref") return (t.ca ? "$" : "") + colName(t.c) + (t.ra ? "$" : "") + (t.r + 1);
       if (t.t === "cols") return (t.a1 ? "$" : "") + colName(t.c1) + ":" + (t.a2 ? "$" : "") + colName(t.c2);
       return (t.a1 ? "$" : "") + (t.r1 + 1) + ":" + (t.a2 ? "$" : "") + (t.r2 + 1);
     })();
-    return sheetPrefix(to) + rest;
+    return sheetPrefix(b ? `${a}:${b}` : a) + rest;
   });
 }
 

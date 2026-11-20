@@ -61,9 +61,9 @@ export function evaluateDialog(doc: Doc, r: number, c: number, onClose: () => vo
     switch (n.k) {
       case "lit": return wrap(esc(lit(n.v)));
       case "omit": return "";
-      case "ref": return wrap(esc((n.sh ? sheetPrefix(n.sh) : "") + colName(n.c) + (n.r + 1)));
+      case "ref": return wrap(esc((n.sh ? sheetPrefix(n.sh2 ? `${n.sh}:${n.sh2}` : n.sh) : "") + colName(n.c) + (n.r + 1)));
       case "range": {
-        const p = n.sh ? sheetPrefix(n.sh) : "";
+        const p = n.sh ? sheetPrefix(n.sh2 ? `${n.sh}:${n.sh2}` : n.sh) : "";
         const t = n.r1 < 0 ? `${colName(n.c1)}:${colName(n.c2)}` : n.c1 < 0 ? `${n.r1 + 1}:${n.r2 + 1}` : `${colName(n.c1)}${n.r1 + 1}:${colName(n.c2)}${n.r2 + 1}`;
         return wrap(esc(p + t));
       }
@@ -76,6 +76,7 @@ export function evaluateDialog(doc: Doc, r: number, c: number, onClose: () => vo
       case "paren": return wrap(`(${R(n.a)})`);
       case "array": return wrap(esc(`{${n.rows.map((row) => row.map((x) => (x.k === "lit" ? lit(x.v) : "?")).join(",")).join(";")}}`));
       case "spill": return wrap(`${R(n.a)}#`);
+      case "union": return wrap(`(${n.parts.map(R).join(", ")})`);
     }
   };
 

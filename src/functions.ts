@@ -22,12 +22,16 @@ export interface Ctx {
   /** The cell being calculated. */
   r: number; c: number;
   /** A reference from text, for INDIRECT. */
-  refFromText(text: string): RefV | FErr;
+  refFromText(text: string, a1?: boolean): RefV | FErr;
+  sheetName(): string;
+  /** 0-based position of a sheet by name (-1 if none). */
+  sheetIndex(name: string): number;
+  sheetCount(): number;
   /** A sub-range of a reference (for INDEX / OFFSET), clipped to the sheet. */
   subRef(ref: RefV, r1: number, c1: number, r2: number, c2: number): RefV | FErr;
 }
 
-export type Cat = "Math" | "Statistics" | "Logic" | "Lookup" | "Text" | "Date" | "Finance" | "Info" | "Array" | "Lambda";
+export type Cat = "Math" | "Statistics" | "Logic" | "Lookup" | "Text" | "Date" | "Finance" | "Info" | "Array" | "Lambda" | "Engineering" | "Database";
 
 export interface FnSpec {
   min: number;
@@ -683,7 +687,7 @@ def("OFFSET", { min: 3, max: 5, args: "reference, rows, columns, [height], [widt
   if (r1 < 0 || c1 < 0) return ERR.ref;
   return x.subRef(a[0], r1, c1, r1 + Math.floor(h as number) - 1, c1 + Math.floor(w as number) - 1);
 } });
-def("INDIRECT", { min: 1, max: 2, args: "reference_text", desc: "The cell or range named by some text, e.g. \"B\"&A1.", cat: "Lookup", spills: true, volatile: true, fn: (a, x) => { const t = S(a[0]); return isErr(t) ? t : x.refFromText(t); } });
+def("INDIRECT", { min: 1, max: 2, args: "reference_text, [a1]", desc: "The cell or range named by some text, e.g. \"B\"&A1 (a1 FALSE for R1C1 style).", cat: "Lookup", spills: true, volatile: true, fn: (a, x) => { const t = S(a[0]); const a1 = optB(a[1], true); if (isErr(a1)) return a1; return isErr(t) ? t : x.refFromText(t, a1); } });
 def("ADDRESS", { min: 2, max: 5, args: "row, column, [absolute], [a1], [sheet]", desc: "A cell's address as text, e.g. $B$3.", cat: "Lookup", lift: [0, 1], fn: (a) => {
   const r = N(a[0]), c = N(a[1]), mode = optN(a[2], 1);
   if (num(r, c, mode)) return num(r, c, mode)!;
@@ -1025,4 +1029,4 @@ def("MAKEARRAY", { min: 3, max: 3, args: "rows, columns, lambda(row, column)", d
 
 void OMIT; void formatNumber;
 
-export const FUNCTION_NAMES = Object.keys(FUNCS).sort();
+export { N, S, B, given, optN, optB, num, numbers, def, alias, ymd, daysInMonth, addMonths, solve, lamOf, asVal, transpose, sortRows, flat1, pick };

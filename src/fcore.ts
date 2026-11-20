@@ -40,6 +40,8 @@ export const OMIT: OmitV = { k: "omit" };
 
 export interface EngineLike {
   value(r: number, c: number): Val;
+  /** The cell's text as typed (formulas included). */
+  rawAt(r: number, c: number): string;
   rowCount(): number;
   colCount(): number;
   sheetName(): string;
@@ -247,9 +249,9 @@ export function criterion(c: Val): (v: Val) => boolean {
 export type Tok =
   | { t: "num"; v: number; s: number; e: number }
   | { t: "str"; v: string; s: number; e: number }
-  | { t: "ref"; r: number; c: number; s: number; e: number; ra: boolean; ca: boolean; sh?: string; shs?: number }
-  | { t: "cols"; c1: number; c2: number; s: number; e: number; a1: boolean; a2: boolean; sh?: string; shs?: number }
-  | { t: "rows"; r1: number; r2: number; s: number; e: number; a1: boolean; a2: boolean; sh?: string; shs?: number }
+  | { t: "ref"; r: number; c: number; s: number; e: number; ra: boolean; ca: boolean; sh?: string; sh2?: string; shs?: number }
+  | { t: "cols"; c1: number; c2: number; s: number; e: number; a1: boolean; a2: boolean; sh?: string; sh2?: string; shs?: number }
+  | { t: "rows"; r1: number; r2: number; s: number; e: number; a1: boolean; a2: boolean; sh?: string; sh2?: string; shs?: number }
   | { t: "id"; v: string; s: number; e: number }
   | { t: "op"; v: string; s: number; e: number }
   | { t: "err"; v: string; s: number; e: number };
@@ -257,7 +259,7 @@ export type Tok =
 const REF_RE = /^(\$?)([A-Za-z]{1,3})(\$?)(\d+)/;
 const COLS_RE = /^(\$?)([A-Za-z]{1,3}):(\$?)([A-Za-z]{1,3})(?![A-Za-z0-9_(])/;
 const ROWS_RE = /^(\$?)(\d+):(\$?)(\d+)(?![A-Za-z0-9_.(])/;
-const SHEET_RE = /^(?:'((?:[^']|'')+)'|([A-Za-z_À-￿][A-Za-z0-9_.À-￿]*))!/;
+const SHEET_RE = /^(?:'((?:[^']|'')+)'|([A-Za-z_À-￿][A-Za-z0-9_.À-￿]*(?::[A-Za-z_À-￿][A-Za-z0-9_.À-￿]*)?))!/;
 const MAX_COL = 16384, MAX_ROW = 1048576;
 
 /** Split formula text (without the "=") into tokens with their positions. */
@@ -266,13 +268,24 @@ export function tokenize(src: string): Tok[] {
   let i = 0;
   while (i < src.length) {
     const ch = src[i];
-    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") { i++; continue; }
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+      // A space between two references is the intersection operator (A1:C5 B2:B9).
+      let k = i;
+      while (k < src.length && /\s/.test(src[k])) k++;
+      const prev = out[out.length - 1];
+      if (prev && (prev.t === "ref" || prev.t === "cols" || prev.t === "rows") && k < src.length && startsRef(src.slice(k))) out.push({ t: "op", v: "∩", s: i, e: k });
+      i = k;
+      continue;
+    }
     const rest = src.slice(i);
     let m: RegExpExecArray | null;
-    // Sheet prefix: Sheet2!A1, 'My sheet'!A1:B4
-    let sh: string | undefined, shs: number | undefined, j = i;
+    // Sheet prefix: Sheet2!A1, 'My sheet'!A1:B4, Sheet1:Sheet3!A1 (3-D)
+    let sh: string | undefined, sh2: string | undefined, shs: number | undefined, j = i;
     if ((m = SHEET_RE.exec(rest)) && (REF_RE.test(rest.slice(m[0].length)) || COLS_RE.test(rest.slice(m[0].length)) || ROWS_RE.test(rest.slice(m[0].length)))) {
-      sh = m[1] !== undefined ? m[1].replace(/''/g, "'") : m[2];
+      const name = m[1] !== undefined ? m[1].replace(/''/g, "'") : m[2];
+      const parts = name.split(":");
+      sh = parts[0];
+      if (parts.length === 2) sh2 = parts[1];
       shs = i;
       j = i + m[0].length;
     }
@@ -290,13 +303,13 @@ export function tokenize(src: string): Tok[] {
       out.push({ t: "str", v, s: i, e: k + 1 });
       i = k + 1;
     } else if ((m = COLS_RE.exec(r2))) {
-      out.push({ t: "cols", c1: colIndex(m[2].toUpperCase()), c2: colIndex(m[4].toUpperCase()), a1: !!m[1], a2: !!m[3], s: i, e: j + m[0].length, sh, shs });
+      out.push({ t: "cols", c1: colIndex(m[2].toUpperCase()), c2: colIndex(m[4].toUpperCase()), a1: !!m[1], a2: !!m[3], s: i, e: j + m[0].length, sh, sh2, shs });
       i = j + m[0].length;
     } else if ((m = ROWS_RE.exec(r2)) && (sh !== undefined || !/[\d.]/.test(src[i - 1] ?? ""))) {
-      out.push({ t: "rows", r1: Number(m[2]) - 1, r2: Number(m[4]) - 1, a1: !!m[1], a2: !!m[3], s: i, e: j + m[0].length, sh, shs });
+      out.push({ t: "rows", r1: Number(m[2]) - 1, r2: Number(m[4]) - 1, a1: !!m[1], a2: !!m[3], s: i, e: j + m[0].length, sh, sh2, shs });
       i = j + m[0].length;
     } else if ((m = REF_RE.exec(r2)) && !/^[A-Za-z0-9_(.]/.test(r2.slice(m[0].length)) && colIndex(m[2].toUpperCase()) < MAX_COL && Number(m[4]) >= 1 && Number(m[4]) <= MAX_ROW) {
-      out.push({ t: "ref", c: colIndex(m[2].toUpperCase()), r: Number(m[4]) - 1, ca: !!m[1], ra: !!m[3], s: i, e: j + m[0].length, sh, shs });
+      out.push({ t: "ref", c: colIndex(m[2].toUpperCase()), r: Number(m[4]) - 1, ca: !!m[1], ra: !!m[3], s: i, e: j + m[0].length, sh, sh2, shs });
       i = j + m[0].length;
     } else if ((m = /^#(?:N\/A|[A-Z0-9/]+[!?])/.exec(rest))) {
       out.push({ t: "err", v: m[0], s: i, e: i + m[0].length });
@@ -314,12 +327,20 @@ export function tokenize(src: string): Tok[] {
   return out;
 }
 
+function startsRef(s: string): boolean {
+  const m = SHEET_RE.exec(s);
+  const t = m ? s.slice(m[0].length) : s;
+  const r = REF_RE.exec(t);
+  return !!(COLS_RE.test(t) || (r && !/^[A-Za-z0-9_(.]/.test(t.slice(r[0].length))));
+}
+
 /* -------------------------------- syntax -------------------------------- */
 
 export type Node = (
   | { k: "lit"; v: Val }
-  | { k: "ref"; r: number; c: number; sh?: string }
-  | { k: "range"; r1: number; c1: number; r2: number; c2: number; sh?: string } // r = -1 → whole column, c = -1 → whole row
+  | { k: "ref"; r: number; c: number; sh?: string; sh2?: string }
+  | { k: "range"; r1: number; c1: number; r2: number; c2: number; sh?: string; sh2?: string } // r = -1 → whole column, c = -1 → whole row
+  | { k: "union"; parts: Node[] }
   | { k: "name"; v: string }
   | { k: "fn"; name: string; args: Node[] }
   | { k: "call"; callee: Node; args: Node[] }
@@ -334,7 +355,7 @@ export type Node = (
 
 const BIN_PREC: Record<string, number> = {
   "=": 1, "<>": 1, "<": 1, ">": 1, "<=": 1, ">=": 1,
-  "&": 2, "+": 3, "-": 3, "*": 4, "/": 4, "^": 5,
+  "&": 2, "+": 3, "-": 3, "*": 4, "/": 4, "^": 5, "∩": 7,
 };
 export const COMPARE_OPS = new Set(["=", "<>", "<", ">", "<=", ">="]);
 
@@ -368,14 +389,14 @@ export function parse(src: string): Node {
       case "num": node = { k: "lit", v: t.v, s, e: t.e }; break;
       case "str": node = { k: "lit", v: t.v, s, e: t.e }; break;
       case "err": node = { k: "lit", v: new FErr(t.v), s, e: t.e }; break;
-      case "cols": node = { k: "range", r1: -1, c1: Math.min(t.c1, t.c2), r2: -1, c2: Math.max(t.c1, t.c2), sh: t.sh, s, e: t.e }; break;
-      case "rows": node = { k: "range", r1: Math.min(t.r1, t.r2), c1: -1, r2: Math.max(t.r1, t.r2), c2: -1, sh: t.sh, s, e: t.e }; break;
+      case "cols": node = { k: "range", r1: -1, c1: Math.min(t.c1, t.c2), r2: -1, c2: Math.max(t.c1, t.c2), sh: t.sh, sh2: t.sh2, s, e: t.e }; break;
+      case "rows": node = { k: "range", r1: Math.min(t.r1, t.r2), c1: -1, r2: Math.max(t.r1, t.r2), c2: -1, sh: t.sh, sh2: t.sh2, s, e: t.e }; break;
       case "ref": {
         if (isOp(":") && toks[p + 1]?.t === "ref" && !(toks[p + 1] as { sh?: string }).sh) {
           p++;
           const b = toks[p++] as Extract<Tok, { t: "ref" }>;
-          node = { k: "range", r1: Math.min(t.r, b.r), c1: Math.min(t.c, b.c), r2: Math.max(t.r, b.r), c2: Math.max(t.c, b.c), sh: t.sh, s, e: b.e };
-        } else node = { k: "ref", r: t.r, c: t.c, sh: t.sh, s, e: t.e };
+          node = { k: "range", r1: Math.min(t.r, b.r), c1: Math.min(t.c, b.c), r2: Math.max(t.r, b.r), c2: Math.max(t.c, b.c), sh: t.sh, sh2: t.sh2, s, e: b.e };
+        } else node = { k: "ref", r: t.r, c: t.c, sh: t.sh, sh2: t.sh2, s, e: t.e };
         break;
       }
       case "id": {
@@ -390,7 +411,20 @@ export function parse(src: string): Node {
         break;
       }
       case "op": {
-        if (t.v === "(") { const a = expr(0); expect(")"); node = { k: "paren", a, s, e: end() }; break; }
+        if (t.v === "(") {
+          const a = expr(0);
+          // (A1:A3, C1:C3) — a union of references.
+          if (isOp(",")) {
+            const parts = [a];
+            while (isOp(",")) { p++; parts.push(expr(0)); }
+            expect(")");
+            node = { k: "union", parts, s, e: end() };
+            break;
+          }
+          expect(")");
+          node = { k: "paren", a, s, e: end() };
+          break;
+        }
         if (t.v === "-") { const a = expr(6); node = { k: "neg", a, s, e: a.e }; break; }
         if (t.v === "+") return expr(6);
         if (t.v === "@") return primary();

@@ -1480,8 +1480,8 @@ export class App {
 
   /** The Σ menu: quick totals, then every function by category, then the tools. */
   private functionMenu(): MenuItem[] {
-    const cats = ["Math", "Statistics", "Logic", "Lookup", "Text", "Date", "Finance", "Array", "Info", "Lambda"] as const;
-    const label: Record<string, string> = { Math: "Maths", Statistics: "Statistics", Logic: "Logic", Lookup: "Lookup", Text: "Text", Date: "Date & time", Finance: "Finance", Array: "Arrays", Info: "Information", Lambda: "LET & LAMBDA" };
+    const cats = ["Math", "Statistics", "Logic", "Lookup", "Text", "Date", "Finance", "Array", "Database", "Engineering", "Info", "Lambda"] as const;
+    const label: Record<string, string> = { Math: "Maths", Statistics: "Statistics", Logic: "Logic", Lookup: "Lookup", Text: "Text", Date: "Date & time", Finance: "Finance", Array: "Arrays", Database: "Database", Engineering: "Engineering", Info: "Information", Lambda: "LET & LAMBDA" };
     const seen = new Set<string>();
     const byCat = (cat: string): MenuItem[] => Object.keys(FUNCS).sort()
       .filter((n) => FUNCS[n].cat === cat && !seen.has(FUNCS[n].sig))

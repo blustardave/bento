@@ -175,6 +175,7 @@ export class Doc {
       sheet: (name) => this.book.sheets.find((s) => s.sheetName.toLowerCase() === name.toLowerCase())?.engine ?? null,
       definedName: (name) => this.book.names.get(name.toUpperCase())?.ref,
       formulas: () => this.formulaCells(),
+      sheetNames: () => this.book.sheets.map((s) => s.sheetName),
     });
   }
 
