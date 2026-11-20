@@ -9,16 +9,16 @@
 }
 
 [data-theme="light"] {
-  /* Near-white with just a breath of warmth, like paper rather than cream. */
-  --bg: #fdfdfc;
-  --surface: #f4f4f2;
-  --surface-2: #eaeae7;
+  /* Paper-white with a little warmth (between the old cream and plain white). */
+  --bg: #fcfbf8;
+  --surface: #f3f2ed;
+  --surface-2: #eae8e2;
   --raised: #ffffff;
-  --line: #e3e3e0;
-  --line-strong: #d0d0cc;
+  --line: #e6e5df;
+  --line-strong: #d4d2cb;
   --text: #1f1e1d;
-  --text-2: #5c5b57;
-  --muted: #84837e;
+  --text-2: #5d5c58;
+  --muted: #85837c;
   --accent: #d97757;
   --accent-text: #b4553a;
   --accent-soft: rgba(217, 119, 87, 0.1);
@@ -26,7 +26,7 @@
   --sel-fill: rgba(217, 119, 87, 0.065);
   --sel-head: rgba(217, 119, 87, 0.15);
   --sel-head-strong: rgba(217, 119, 87, 0.32);
-  --on-accent: #fdfdfc;
+  --on-accent: #fcfbf8;
   --error: #c4453a;
   --match: rgba(230, 180, 60, 0.28);
   --shadow: 0 1px 2px rgba(31, 30, 29, 0.06), 0 8px 24px rgba(31, 30, 29, 0.1);
@@ -61,15 +61,16 @@
 }
 
 [data-theme="dark"] {
+  /* Warm charcoal: gridlines that read without shouting, menus that lift off the page. */
   --bg: #262624;
-  --surface: #2d2c2a;
-  --surface-2: #383733;
-  --raised: #32312e;
-  --line: #363532;
-  --line-strong: #45443f;
-  --text: #ecebe4;
-  --text-2: #c2c0b7;
-  --muted: #918f86;
+  --surface: #2c2b29;
+  --surface-2: #3a3935;
+  --raised: #31302d;
+  --line: #3a3935;
+  --line-strong: #4c4b46;
+  --text: #eeede6;
+  --text-2: #c6c4bb;
+  --muted: #9b9990;
   --accent: #e08a6d;
   --accent-text: #eb9a7e;
   --accent-soft: rgba(224, 138, 109, 0.16);
@@ -80,8 +81,8 @@
   --on-accent: #262624;
   --error: #ef7a6e;
   --match: rgba(230, 180, 60, 0.22);
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 30px rgba(0, 0, 0, 0.35);
-  --scrim: rgba(0, 0, 0, 0.35);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --scrim: rgba(0, 0, 0, 0.4);
   color-scheme: dark;
 }
 

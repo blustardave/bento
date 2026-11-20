@@ -944,7 +944,9 @@ export class App {
   /* -------------------------------- theme -------------------------------- */
 
   private theme(): Theme {
-    return (localStorage.getItem("bento.theme") as Theme) || "system";
+    // Dusk is retired for now; anyone who had it gets Dark.
+    const t = localStorage.getItem("bento.theme") as Theme | null;
+    return t === "dusk" ? "dark" : t || "system";
   }
 
   private setTheme(t: Theme) {
@@ -1230,7 +1232,7 @@ export class App {
       this.grid.invalidate();
     });
     const appearance = el("div", { class: "psec" },
-      row("Theme", "Follow Windows, or pick one.", seg([["system", "System"], ["light", "Light"], ["dusk", "Dusk"], ["dark", "Dark"]], this.theme(), (v) => this.setTheme(v as Theme))),
+      row("Theme", "Follow Windows, or pick one.", seg([["system", "System"], ["light", "Light"], ["dark", "Dark"]], this.theme(), (v) => this.setTheme(v as Theme))),
       row("Accent colour", "Selections, highlights and buttons.", el("div", { class: "accent-wrap" }, accent, accentName)),
       row("Gridlines", "How strongly the lines between cells show. The header edges always stay.", el("div", { class: "slider-wrap" }, grid, gridVal)),
       row("Toolbar", "Ctrl+Shift+F also shows and hides it.", sw(!document.getElementById("app")!.classList.contains("toolbar-hidden"), (v) => this.setToolbar(v))),
