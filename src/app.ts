@@ -1393,9 +1393,9 @@ export class App {
     const rows = n === 1 ? "row" : `${formatInt(n)} rows`;
     const item = (label: string, action: () => void, extra: Partial<Extract<MenuItem, { label: string }>> = {}) => ({ label, action, icon: undefined, ...extra }) as Extract<MenuItem, { label: string }>;
     return {
-      above: item(`Insert ${rows} above`, () => { d.insertRows(d.dataRow(s.r0), n); this.afterStructure(); }, { icon: ROWCOL_ICONS.above }),
+      above: item(`Insert ${rows} above`, () => { d.insertRows(d.dataRow(s.r0), n, d.dataRow(s.r0)); this.afterStructure(); }, { icon: ROWCOL_ICONS.above }),
       below: item(`Insert ${rows} below`, () => {
-        d.insertRows(d.dataRow(s.r1) + 1, n);
+        d.insertRows(d.dataRow(s.r1) + 1, n, d.dataRow(s.r1));
         this.grid.select({ ar: s.r1 + 1, ac: d.sel.ac, fr: s.r1 + n, fc: d.sel.fc }, false);
         this.afterStructure();
       }, { icon: ROWCOL_ICONS.below }),
@@ -1410,9 +1410,9 @@ export class App {
     const cols = n === 1 ? "column" : `${n} columns`;
     const item = (label: string, action: () => void, extra: Partial<Extract<MenuItem, { label: string }>> = {}) => ({ label, action, ...extra }) as Extract<MenuItem, { label: string }>;
     return {
-      left: item(`Insert ${cols} left`, () => { d.insertCols(s.c0, n); this.afterStructure(); }, { icon: ROWCOL_ICONS.left }),
+      left: item(`Insert ${cols} left`, () => { d.insertCols(s.c0, n, s.c0); this.afterStructure(); }, { icon: ROWCOL_ICONS.left }),
       right: item(`Insert ${cols} right`, () => {
-        d.insertCols(s.c1 + 1, n);
+        d.insertCols(s.c1 + 1, n, s.c1);
         this.grid.select({ ar: d.sel.ar, ac: s.c1 + 1, fr: d.sel.fr, fc: s.c1 + n }, false);
         this.afterStructure();
       }, { icon: ROWCOL_ICONS.right }),

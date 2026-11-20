@@ -766,7 +766,8 @@ export class Doc {
     this.engine.structureChanged();
   }
 
-  insertRows(at: number, n: number) {
+  /** Insert n rows at `at`; with `like`, they take that row's formatting and height (as in Sheets). */
+  insertRows(at: number, n: number, like?: number) {
     let before: string[][] = [];
     let fx: CellChange[] = [];
     this.push({
@@ -775,9 +776,18 @@ export class Doc {
       run: () => {
         before = this.rows;
         this.gridRows = Math.max(this.gridRows, this.rows.length) + n;
-        if (at >= this.rows.length) { fx = []; return; } // below the data: the sheet just gets longer
+        const src = like !== undefined ? this.rows[like] : undefined;
+        const srcStyle = src ? this.rowStyles.get(src) : undefined;
+        const srcHeight = src ? this.manualHeights.get(src) : undefined;
+        if (at >= this.rows.length && !srcStyle && srcHeight === undefined) { fx = []; return; } // below the data: the sheet just gets longer
+        if (at > this.rows.length) this.rows = [...this.rows, ...Array.from({ length: at - this.rows.length }, () => [] as string[])];
         const fresh: string[][] = [];
-        for (let i = 0; i < n; i++) fresh.push([]);
+        for (let i = 0; i < n; i++) {
+          const row: string[] = [];
+          if (srcStyle?.some(Boolean)) this.rowStyles.set(row, [...srcStyle]);
+          if (srcHeight !== undefined) this.putManual(row, srcHeight);
+          fresh.push(row);
+        }
         this.rows = [...this.rows.slice(0, at), ...fresh, ...this.rows.slice(at)];
         this.keepRows = Math.max(this.keepRows, 0) + n;
         fx = this.shiftFormulas("row", at, n);
@@ -829,7 +839,8 @@ export class Doc {
     });
   }
 
-  insertCols(at: number, n: number) {
+  /** Insert n columns at `at`; with `like`, they take that column's formatting and width. */
+  insertCols(at: number, n: number, like?: number) {
     let fx: CellChange[] = [];
     let oldCols = 0;
     let oldKeep = 0;
@@ -855,6 +866,17 @@ export class Doc {
         if (this.cols > at || at < this.keepCols) this.cols += n;
         this.keepCols = Math.max(this.keepCols, at) + n;
         shiftMeta(1);
+        if (like !== undefined) {
+          const src = like >= at ? like + n : like;
+          for (const row of this.rows) {
+            const st = this.rowStyles.get(row);
+            if (!st || !st[src]) continue;
+            while (st.length < at + n) st.push(0);
+            for (let k = 0; k < n; k++) st[at + k] = st[src];
+          }
+          const w = this.widths.get(src);
+          if (w !== undefined) for (let k = 0; k < n; k++) this.widths.set(at + k, w);
+        }
         fx = this.shiftFormulas("col", at, n);
         this.merges = this.merges.map((m) => m.c0 >= at ? { ...m, c0: m.c0 + n, c1: m.c1 + n } : m.c1 >= at ? { ...m, c1: m.c1 + n } : m);
       },

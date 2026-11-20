@@ -202,5 +202,22 @@ eq(book.names.get("QTY")!.ref, "'Fruit stall'!$B$2:$B$5", "rename sheet rewrites
   eq(d.rows.map((r) => r[2] + "|" + r[0]), ["=A1-B1|5", "=A2-B2|2", "=A3-B3|7"], "undo sort");
 }
 
+// Inserted rows/columns take the formatting and size of the one they're next to.
+{
+  const b3 = new Book("i", null);
+  const d = new Doc("i", null, b3); b3.sheets.push(d);
+  d.load([["a", "b"], ["c", "d"]]);
+  const bold = d.intern({ b: true, ha: "c" });
+  d.setCells([{ r: 0, c: 1, style: bold }, { r: 1, c: 1, style: bold }]);
+  d.widths.set(1, 200);
+  d.insertCols(1, 1, 1);
+  eq([d.style(0, 1).b, d.style(1, 1).ha, d.width(1), d.raw(0, 1), d.raw(0, 2), d.style(0, 2).b], [true, "c", 200, "", "b", true], "insert column takes formatting");
+  d.undo();
+  eq([d.raw(0, 1), d.width(1), d.style(0, 1).b], ["b", 200, true], "undo insert column");
+  d.setRowHeights([1], 40);
+  d.insertRows(2, 1, 1);
+  eq([d.style(2, 1).b, d.rowHeight(2), d.raw(2, 0)], [true, 40, ""], "insert row below takes formatting and height");
+}
+
 console.log(fails ? `${fails} FAILED` : "FORMULAS PASS");
 if (fails) process.exitCode = 1;
