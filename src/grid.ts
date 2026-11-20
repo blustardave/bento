@@ -84,14 +84,39 @@ function prefNumber(key: string, fallback: number): number {
 }
 
 /** The formula as HTML with references coloured (same colours as the boxes on the grid). */
-function highlightFormula(text: string): string {
+/** A reference's identity for colouring: B2 and $B$2 are the same cell. */
+function refKey(text: string, r: { s: number; e: number }): string {
+  return text.slice(r.s, r.e).replace(/\$/g, "").toUpperCase();
+}
+/** One colour per distinct reference, in order of first appearance. */
+function refColors(text: string): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const r of Engine.references(text)) { const k = refKey(text, r); if (!m.has(k)) m.set(k, REF_COLORS[m.size % REF_COLORS.length]); }
+  return m;
+}
+/** The reference the caret is in or touching, if any. */
+function refAt(text: string, caret: number) {
+  if (caret < 0 || !text.startsWith("=")) return null;
+  return Engine.references(text).find((r) => caret >= r.s && caret <= r.e) ?? null;
+}
+
+function highlightFormula(text: string, caret = -1): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
   let toks: Tok[];
   try { toks = tokenize(text.slice(1)); } catch { return esc(text); }
   let out = "=";
   let last = 0;
   const body = text.slice(1);
-  let ci = 0;
+  const colors = refColors(text);
+  const active = refAt(text, caret);
+  const activeKey = active ? refKey(text, active) : null;
+  const paint = (span: string) => {
+    const key = span.replace(/\$/g, "").toUpperCase();
+    const color = colors.get(key) ?? REF_COLORS[0];
+    return key === activeKey
+      ? `<span style="color:${color};background:${color}26;border-radius:2px;box-shadow:0 0 0 1px ${color}55">${esc(span)}</span>`
+      : `<span style="color:${color}">${esc(span)}</span>`;
+  };
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
     out += esc(body.slice(last, t.s));
@@ -99,10 +124,12 @@ function highlightFormula(text: string): string {
     let cls = "";
     let color = "";
     if (t.t === "ref" || t.t === "cols" || t.t === "rows") {
-      color = REF_COLORS[ci++ % REF_COLORS.length];
       // A1:B5 is one reference, one colour.
       const nx = toks[i + 1], b = toks[i + 2];
-      if (t.t === "ref" && nx?.t === "op" && nx.v === ":" && b?.t === "ref" && !b.sh) { span = body.slice(t.s, b.e); i += 2; last = b.e; out += `<span style="color:${color}">${esc(span)}</span>`; continue; }
+      if (t.t === "ref" && nx?.t === "op" && nx.v === ":" && b?.t === "ref" && !b.sh) { span = body.slice(t.s, b.e); i += 2; last = b.e; out += paint(span); continue; }
+      out += paint(span);
+      last = t.e;
+      continue;
     } else if (t.t === "str") cls = "hl-str";
     else if (t.t === "num") cls = "hl-num";
     else if (t.t === "err") cls = "hl-err";
@@ -1206,6 +1233,7 @@ export class Grid {
   setFormulaBar(input: HTMLInputElement) {
     this.bar = input;
     input.addEventListener("input", () => { if (!this.pointing) this.pointRef = null; if (this.editing) this.invalidate(); });
+    for (const ev of ["keyup", "click", "select"]) input.addEventListener(ev, () => { if (this.editing && input.value.startsWith("=")) this.invalidate(); });
   }
 
   private formulaField(): HTMLInputElement | HTMLTextAreaElement | null {
@@ -1218,9 +1246,9 @@ export class Grid {
   private expectsRef(f: HTMLInputElement | HTMLTextAreaElement): boolean {
     const caret = f.selectionStart ?? f.value.length;
     if (this.pointRef && this.pointRef.field === f && caret === this.pointRef.end) return true;
-    const before = f.value.slice(0, caret).replace(/\s+$/, "");
-    if ((before.match(/"/g) ?? []).length % 2) return false;
-    return /[=(,;+\-*/^&<>:{]$/.test(before);
+    // Anywhere in a formula except inside quoted text (as in Sheets).
+    const before = f.value.slice(0, caret);
+    return (before.match(/"/g) ?? []).length % 2 === 0;
   }
 
   /** Put (or update) a pointed-at reference in the formula being typed. */
@@ -1232,8 +1260,10 @@ export class Grid {
     const caret = f.selectionStart ?? f.value.length;
     const p = this.pointRef;
     const replacing = p && p.field === f && (!fresh || caret === p.end);
-    const start = replacing ? p!.start : f.selectionStart ?? caret;
-    const end = replacing ? p!.end : f.selectionEnd ?? caret;
+    // Clicking with the caret on a reference swaps that reference.
+    const under = !replacing && f.selectionStart === f.selectionEnd ? refAt(f.value, caret) : null;
+    const start = replacing ? p!.start : under ? under.s : f.selectionStart ?? caret;
+    const end = replacing ? p!.end : under ? under.e : f.selectionEnd ?? caret;
     f.value = f.value.slice(0, start) + ref + f.value.slice(end);
     const pos = start + ref.length;
     f.focus();
@@ -1252,9 +1282,12 @@ export class Grid {
     const text = document.activeElement === this.bar && this.bar ? this.bar.value : this.editor.value;
     if (!text.startsWith("=")) return;
     const { ctx } = this;
-    let i = 0;
+    const field = document.activeElement === this.bar && this.bar ? this.bar : this.editor;
+    const active = refAt(text, field.selectionStart ?? -1);
+    const colors = refColors(text);
     for (const ref of Engine.references(text)) {
-      const color = REF_COLORS[i++ % REF_COLORS.length];
+      const color = colors.get(refKey(text, ref))!;
+      const hot = !!active && refKey(text, active) === refKey(text, ref);
       if (ref.sheet && ref.sheet.toLowerCase() !== d.sheetName.toLowerCase()) continue;
       if (d.view) continue;
       const r1 = ref.r1 < 0 ? 0 : ref.r1, r2 = ref.r2 < 0 ? d.displayRows() - 1 : Math.min(ref.r2, d.displayRows() - 1);
@@ -1263,13 +1296,21 @@ export class Grid {
       const x1 = this.colLeft(c2) + this.cw(c2), y1 = this.rowTop(r2) + this.rowH(r2);
       if (x1 < 0 || y1 < 0 || x0 > this.w || y0 > this.h) continue;
       ctx.save();
-      ctx.globalAlpha = 0.1;
+      // The reference the caret is on stands out; the rest stay quiet.
+      ctx.globalAlpha = hot ? 0.2 : 0.08;
       ctx.fillStyle = color;
       ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = active && !hot ? 0.6 : 1;
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(Math.round(x0) + 0.75, Math.round(y0) + 0.75, Math.round(x1 - x0) - 1.5, Math.round(y1 - y0) - 1.5);
+      const lw = hot ? 2.5 : 1.5;
+      ctx.lineWidth = lw;
+      ctx.strokeRect(Math.round(x0) + lw / 2, Math.round(y0) + lw / 2, Math.round(x1 - x0) - lw, Math.round(y1 - y0) - lw);
+      if (hot) {
+        // Little corner squares, like a selection.
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = color;
+        for (const [cx, cy] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]) ctx.fillRect(Math.round(cx) - 3, Math.round(cy) - 3, 6, 6);
+      }
       ctx.restore();
     }
   }
@@ -2114,7 +2155,7 @@ export class Grid {
     if (!on) { pv.hidden = true; return; }
     const es = this.editor.style;
     Object.assign(hl.style, { left: es.left, top: es.top, width: es.width, height: es.height, font: es.font, lineHeight: es.lineHeight, padding: es.padding });
-    hl.innerHTML = highlightFormula(this.editor.value) + "\n";
+    hl.innerHTML = highlightFormula(this.editor.value, this.editor.selectionStart ?? -1) + "\n";
     hl.scrollTop = this.editor.scrollTop;
     hl.scrollLeft = this.editor.scrollLeft;
     // The answer so far, in a little chip above the editor.
@@ -2807,6 +2848,9 @@ export class Grid {
       this.hooks.onEditText(this.editor.value);
       if (this.editor.value.startsWith("=")) this.invalidate();
     });
+    // Moving the caret onto a reference highlights it.
+    const caretMoved = () => { if (this.editing && this.editor.value.startsWith("=")) { this.paintFormula(); this.invalidate(); } };
+    for (const ev of ["keyup", "click", "select"]) this.editor.addEventListener(ev, caretMoved);
     this.editor.addEventListener("blur", () => {
       // Clicking elsewhere in the app commits, like a spreadsheet.
       setTimeout(() => {

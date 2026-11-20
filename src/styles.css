@@ -294,7 +294,7 @@ input, textarea { font: inherit; color: inherit; }
   margin-top: -9px;
   background: var(--line-strong);
 }
-.fx { color: var(--muted); font-style: italic; font-family: var(--font-serif); padding: 0 10px; }
+.fx { color: var(--muted); font-style: italic; font-family: var(--font-serif); padding: 0 10px; position: relative; top: 1px; line-height: 1; }
 #cell-input {
   flex: 1;
   height: 100%;
