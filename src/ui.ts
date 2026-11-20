@@ -256,3 +256,30 @@ export function showPopover(anchor: HTMLElement, content: HTMLElement, onClose?:
   openPop = { close };
   return close;
 }
+
+/**
+ * A small dialog around some form content. `onOk` returns false to keep
+ * the dialog open (e.g. an invalid number).
+ */
+export function formDialog(title: string, body: HTMLElement, okLabel: string, onOk: () => boolean | void, onClose?: () => void, cls = "") {
+  closeMenus();
+  const foot = el("div", { class: "foot" });
+  const box = el("div", { class: "modal form " + cls, role: "dialog" }, el("h3", { text: title }), body, foot);
+  const scrim = el("div", { class: "scrim" }, box);
+  const cancel = el("button", { class: "btn", text: "Cancel" });
+  const ok = el("button", { class: "btn primary", text: okLabel });
+  foot.append(cancel, ok);
+  const close = () => { scrim.remove(); window.removeEventListener("keydown", onKey, true); onClose?.(); };
+  const submit = () => { if (onOk() !== false) close(); };
+  cancel.addEventListener("click", close);
+  ok.addEventListener("click", submit);
+  scrim.addEventListener("pointerdown", (e) => { if (e.target === scrim) close(); });
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === "Enter" && (e.target as HTMLElement).tagName !== "TEXTAREA") { e.preventDefault(); e.stopPropagation(); submit(); }
+    else e.stopPropagation();
+  }
+  window.addEventListener("keydown", onKey, true);
+  document.body.append(scrim);
+  return close;
+}

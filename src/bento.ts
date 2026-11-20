@@ -36,6 +36,8 @@ export interface SheetData {
   csv?: CsvSettings;
   /** Charts, images, shapes and text boxes. */
   objects?: SheetObject[];
+  /** Hand-set row heights and hidden rows. */
+  rowMeta?: { heights: [number, number][]; hidden: number[] };
   /** Image data by id (only images still in use). */
   images?: Record<string, string>;
 }
@@ -97,6 +99,7 @@ export function sheetToData(doc: Doc): SheetData {
   for (const id of usedImages) { const u = doc.images.get(id); if (u) images[id] = u; }
   return {
     objects: doc.objects.length ? doc.objects.map((o) => ({ ...o })) : undefined,
+    rowMeta: (() => { const m = doc.rowMeta(); return m.heights.length || m.hidden.length ? m : undefined; })(),
     images: usedImages.size ? images : undefined,
     name: doc.sheetName,
     tabColor: doc.tabColor,
@@ -148,6 +151,7 @@ export function sheetFromData(doc: Doc, file: SheetData) {
     doc.bom = !!file.csv.bom;
   }
   doc.refreshView();
+  if (file.rowMeta) doc.setRowMeta(file.rowMeta.heights ?? [], file.rowMeta.hidden ?? []);
 }
 
 export async function encodeBento(book: Book): Promise<Uint8Array> {

@@ -141,6 +141,13 @@ export class Doc {
   /** Rows taller than default (wrapped text, big fonts), unzoomed px. */
   private rowHeights = new WeakMap<string[], number>();
   tallRows = 0;
+  /** Heights set by hand (Resize row…), which win over measured heights. */
+  private manualHeights = new WeakMap<string[], number>();
+  private manualCount = 0;
+  /** Rows hidden by hand (by row identity, so they survive sorting). */
+  hiddenRows = new Set<string[]>();
+  /** Any row not at the default height? */
+  get anyTall(): boolean { return this.tallRows > 0 || this.manualCount > 0; }
   /** Merged ranges, in data coordinates. */
   merges: Rect[] = [];
   /** Style table: id → style. Id 0 is "no formatting". */
@@ -441,7 +448,76 @@ export class Doc {
   /** Height of a data row in unzoomed px (0 = default). */
   rowHeight(r: number): number {
     const row = this.rows[r];
-    return row ? this.rowHeights.get(row) ?? 0 : 0;
+    return row ? this.manualHeights.get(row) ?? this.rowHeights.get(row) ?? 0 : 0;
+  }
+
+  /** A hand-set height, if any. */
+  manualHeight(r: number): number | undefined {
+    const row = this.rows[r];
+    return row ? this.manualHeights.get(row) : undefined;
+  }
+
+  private putManual(row: string[], h: number | undefined) {
+    const had = this.manualHeights.has(row);
+    if (h === undefined) { if (had) { this.manualHeights.delete(row); this.manualCount--; } }
+    else { if (!had) this.manualCount++; this.manualHeights.set(row, h); }
+  }
+
+  /** Set (or with null, clear) the height of some data rows, as one undo step. */
+  setRowHeights(rows: number[], h: number | null, label = "Resize rows") {
+    while (this.rows.length <= Math.max(...rows)) this.rows.push(new Array(this.cols).fill(""));
+    const targets = rows.map((r) => this.rows[r]);
+    const before = targets.map((row) => this.manualHeights.get(row));
+    this.push({
+      label,
+      selBefore: { ...this.sel },
+      run: () => { for (const row of targets) this.putManual(row, h ?? undefined); this.version++; },
+      undo: () => { targets.forEach((row, i) => this.putManual(row, before[i])); this.version++; },
+    });
+  }
+
+  /** Hide or show data rows, as one undo step. */
+  setRowsHidden(rows: number[] | "all", hide: boolean) {
+    const targets = rows === "all" ? [...this.hiddenRows] : rows.map((r) => this.rows[r]).filter(Boolean);
+    const was = targets.map((row) => this.hiddenRows.has(row));
+    const apply = (on: (i: number) => boolean) => {
+      targets.forEach((row, i) => { if (on(i)) this.hiddenRows.add(row); else this.hiddenRows.delete(row); });
+      this.refreshView();
+      this.version++;
+    };
+    this.push({
+      label: hide ? "Hide rows" : "Unhide rows",
+      selBefore: { ...this.sel },
+      run: () => apply(() => hide),
+      undo: () => apply((i) => was[i]),
+    });
+  }
+
+  /** For saving: hand-set heights and hidden rows, by row index. */
+  rowMeta(): { heights: [number, number][]; hidden: number[] } {
+    const heights: [number, number][] = [], hidden: number[] = [];
+    if (!this.manualCount && !this.hiddenRows.size) return { heights, hidden };
+    this.rows.forEach((row, r) => {
+      const h = this.manualHeights.get(row);
+      if (h !== undefined) heights.push([r, h]);
+      if (this.hiddenRows.has(row)) hidden.push(r);
+    });
+    return { heights, hidden };
+  }
+
+  /** For loading (not undoable). */
+  setRowMeta(heights: [number, number][], hidden: number[]) {
+    for (const [r, h] of heights) if (this.rows[r]) this.putManual(this.rows[r], h);
+    for (const r of hidden) if (this.rows[r]) this.hiddenRows.add(this.rows[r]);
+    this.refreshView();
+  }
+
+  /** How many hidden rows are still part of the sheet. */
+  hiddenRowCount(): number {
+    if (!this.hiddenRows.size) return 0;
+    let n = 0;
+    for (const row of this.rows) if (this.hiddenRows.has(row)) n++;
+    return n;
   }
 
   /** Re-measure rows whose content or formatting changed. */
@@ -779,12 +855,14 @@ export class Doc {
   }
 
   refreshView() {
-    if (!this.filters.size) { this.view = null; return; }
+    const hid = this.hiddenRows;
+    if (!this.filters.size && !hid.size) { this.view = null; return; }
     const out: number[] = [];
     const start = this.frozenRows;
-    for (let r = 0; r < start && r < this.rows.length; r++) out.push(r);
+    for (let r = 0; r < start && r < this.rows.length; r++) if (!hid.has(this.rows[r])) out.push(r);
     const fs = [...this.filters];
     outer: for (let r = start; r < this.rows.length; r++) {
+      if (hid.size && hid.has(this.rows[r])) continue;
       for (const [c, hide] of fs) if (hide.has(this.display(r, c))) continue outer;
       out.push(r);
     }
@@ -815,6 +893,9 @@ export class Doc {
     this.rowStyles = new WeakMap();
     this.rowHeights = new WeakMap();
     this.tallRows = 0;
+    this.manualHeights = new WeakMap();
+    this.manualCount = 0;
+    this.hiddenRows = new Set();
     this.styles = [NO_STYLE];
     this.styleIds = new Map([["{}", 0]]);
     this.merges = [];

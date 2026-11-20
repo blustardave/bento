@@ -55,10 +55,22 @@ type Drag =
 interface Editing { r: number; c: number; mode: "replace" | "edit" }
 
 /** Internal clipboard: lets formulas survive copy/paste inside Bento. */
-let lastCopy: { tsv: string; raw: string[][]; styles: Style[][]; rows: number[]; c: number } | null = null;
+let lastCopy: { tsv: string; raw: string[][]; values: string[][]; styles: Style[][]; rows: number[]; c: number } | null = null;
+
+export type PasteMode = "normal" | "values" | "format" | "plain" | "transpose";
+
+function prefNumber(key: string, fallback: number): number {
+  const v = Number(localStorage.getItem(key));
+  return localStorage.getItem(key) !== null && Number.isFinite(v) ? v : fallback;
+}
 
 export class Grid {
   doc: Doc | null = null;
+  private pasteValuesNext = false;
+  /** Gridline strength, 0–1 (Preferences). */
+  gridAlpha = prefNumber("bento.gridOpacity", 100) / 100;
+  /** Where Enter moves after typing (Preferences). */
+  enterRight = localStorage.getItem("bento.enterMoves") === "right";
   readonly wrap: HTMLElement;
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -299,7 +311,7 @@ export class Grid {
   /** Height of a display row on screen. */
   rowH(r: number): number {
     const d = this.doc;
-    if (!d || !d.tallRows) return this.rh;
+    if (!d || !d.anyTall) return this.rh;
     const h = d.rowHeight(d.dataRow(r));
     return h ? this.S(h * this.zoom) : this.rh;
   }
@@ -310,7 +322,7 @@ export class Grid {
 
   private buildYs() {
     const d = this.doc;
-    if (!d || !d.tallRows) { this.ys = null; this.ysKey = ""; return; }
+    if (!d || !d.anyTall) { this.ys = null; this.ysKey = ""; return; }
     const n = d.displayRows();
     const key = `${d.id}:${d.version}:${this.zoom}:${n}`;
     if (key === this.ysKey) return;
@@ -904,6 +916,7 @@ export class Grid {
     // 3. Grid lines (none inside merged cells).
     const L = this.lw;
     ctx.fillStyle = k.line;
+    ctx.globalAlpha = this.gridAlpha;
     const inMergeH = (r: number, c: number) => merges.some((m) => r >= m.r0 && r < m.r1 && c >= m.c0 && c <= m.c1);
     const inMergeV = (r: number, c: number) => merges.some((m) => r >= m.r0 && r <= m.r1 && c >= m.c0 && c < m.c1);
     for (let r = r0; r <= r1; r++) {
@@ -930,6 +943,7 @@ export class Grid {
       }
     }
 
+    ctx.globalAlpha = 1;
     void single;
   }
 
@@ -1107,6 +1121,63 @@ export class Grid {
     return true;
   }
 
+  /** Data rows hidden by hand just above display row r. */
+  hiddenAbove(r: number): number[] {
+    const d = this.doc!;
+    const to = d.dataRow(r);
+    const from = r === 0 ? 0 : d.dataRow(r - 1) + 1;
+    const out: number[] = [];
+    for (let k = from; k < to; k++) if (d.hiddenRows.has(d.rows[k])) out.push(k);
+    return out;
+  }
+
+  /** Two tiny arrows pointing away from a boundary where rows/columns are hidden. */
+  private hiddenMarker(x: number, y: number, axis: "row" | "col") {
+    const { ctx, colors: k } = this;
+    ctx.save();
+    ctx.fillStyle = k.accent;
+    ctx.beginPath();
+    if (axis === "row") {
+      ctx.moveTo(x - 3.5, y - 2); ctx.lineTo(x + 3.5, y - 2); ctx.lineTo(x, y - 5.5); ctx.closePath();
+      ctx.moveTo(x - 3.5, y + 2); ctx.lineTo(x + 3.5, y + 2); ctx.lineTo(x, y + 5.5); ctx.closePath();
+    } else {
+      ctx.moveTo(x - 2, y - 3.5); ctx.lineTo(x - 2, y + 3.5); ctx.lineTo(x - 5.5, y); ctx.closePath();
+      ctx.moveTo(x + 2, y - 3.5); ctx.lineTo(x + 2, y + 3.5); ctx.lineTo(x + 5.5, y); ctx.closePath();
+    }
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /** A click on a hidden-rows/columns marker shows them again. */
+  private unhideAt(zone: string, x: number, y: number): boolean {
+    const d = this.doc!;
+    if (zone === "row" && d.hiddenRows.size) {
+      const r = this.rowAt(y);
+      for (const rr of [r, r + 1]) {
+        if (rr >= d.displayRows() + 1) continue;
+        const top = rr < d.displayRows() ? this.rowTop(rr) : this.rowTop(rr - 1) + this.rowH(rr - 1);
+        if (Math.abs(y - top) > 6 || x < this.rowHeaderWidth() - 18) continue;
+        const rows = rr < d.displayRows() ? this.hiddenAbove(rr) : [];
+        if (rows.length) { d.setRowsHidden(rows, false); this.invalidate(); this.hooks.onChange(); return true; }
+      }
+    }
+    if (zone === "col" && d.hidden.size) {
+      const c = this.colAt(x);
+      for (const cc of [c - 1, c, c + 1]) {
+        if (!d.hidden.has(cc) || Math.abs(x - this.colLeft(cc)) > 6) continue;
+        let a = cc, b = cc;
+        while (a > 0 && d.hidden.has(a - 1)) a--;
+        while (d.hidden.has(b + 1)) b++;
+        for (let i = a; i <= b; i++) d.hidden.delete(i);
+        d.version++;
+        this.invalidate();
+        this.hooks.onChange();
+        return true;
+      }
+    }
+    return false;
+  }
+
   /** Underline / strikethrough for one line of text. */
   private decorate(s: Style, line: string, tx: number, ty: number, px: number, align: CanvasTextAlign) {
     if (!s.u && !s.s) return;
@@ -1135,8 +1206,8 @@ export class Grid {
       const cw = this.cw(c);
       const x = this.colLeft(c);
       if (!cw) {
-        ctx.fillStyle = k.muted;
-        ctx.fillRect(x - 2, 8, 3, hh - 16);
+        // Only one marker per run of hidden columns.
+        if (c === 0 || this.cw(c - 1)) this.hiddenMarker(x, hh - 8, "col");
         continue;
       }
       const hits = rects.filter((r) => c >= r.c0 && c <= r.c1 && (!this.isWholeRows(r) || this.isWholeCols(r)));
@@ -1171,7 +1242,9 @@ export class Grid {
       }
       // Full-height separator, continuous with the grid line below.
       ctx.fillStyle = k.line;
+      ctx.globalAlpha = this.gridAlpha;
       ctx.fillRect(x + cw - this.lw, 0, this.lw, hh);
+      ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
@@ -1194,8 +1267,12 @@ export class Grid {
       ctx.font = whole ? this.fontHeadBold : this.fontHead;
       ctx.fillStyle = whole ? k.text : inSel ? k.accentText : k.muted;
       ctx.fillText(String(d.dataRow(r) + 1), rhw / 2, y + rh / 2 + 0.5);
+      // Rows hidden just above this one: a small up/down marker on the boundary.
+      if (d.hiddenRows.size && this.hiddenAbove(r).length) this.hiddenMarker(rhw - 9, y, "row");
       ctx.fillStyle = k.line;
+      ctx.globalAlpha = this.gridAlpha;
       ctx.fillRect(0, y + rh - this.lw, rhw - this.lw, this.lw);
+      ctx.globalAlpha = 1;
     };
     ctx.textBaseline = "middle";
     ctx.textAlign = "center";
@@ -1761,36 +1838,51 @@ export class Grid {
     const cells = (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
     if (cells > 5_000_000) return null;
     const raw: string[][] = [];
+    const values: string[][] = [];
     const shown: string[][] = [];
     const styles: Style[][] = [];
     const rows: number[] = [];
     for (let r = s.r0; r <= s.r1; r++) {
       const dr = d.dataRow(r);
       rows.push(dr);
-      const a: string[] = [], b: string[] = [], st: Style[] = [];
+      const a: string[] = [], b: string[] = [], st: Style[] = [], vals: string[] = [];
       for (let c = s.c0; c <= s.c1; c++) {
         const v = d.raw(dr, c);
         const sty = d.style(dr, c);
         a.push(v);
+        if (v.charCodeAt(0) === 61) { const val = d.engine.value(dr, c); vals.push(val === null || val === undefined ? "" : typeof val === "boolean" ? (val ? "TRUE" : "FALSE") : String(val)); }
+        else vals.push(v);
         st.push(sty);
         b.push(v ? this.cellText(dr, c, v, sty).text : "");
       }
       raw.push(a);
+      values.push(vals);
       shown.push(b);
       styles.push(st);
     }
     const tsv = toTSV(shown);
-    lastCopy = { tsv, raw, styles, rows, c: s.c0 };
+    lastCopy = { tsv, raw, values, styles, rows, c: s.c0 };
     if (cut) this.clear("Cut");
     return tsv;
   }
 
-  paste(text: string) {
+  paste(text: string, mode: PasteMode = "normal") {
     const d = this.doc;
     if (!d) return;
-    const internal = lastCopy && lastCopy.tsv === text ? lastCopy : null;
-    const block = internal ? internal.raw : fromTSV(text);
+    let internal = lastCopy && lastCopy.tsv === text ? lastCopy : null;
+    if (mode === "format" && !internal) { this.hooks.onNotice?.("Formatting can only be pasted from cells copied in Bento"); return; }
+    let block = internal ? (mode === "values" ? internal.values : internal.raw) : fromTSV(text);
+    let styles = internal?.styles;
+    if (mode === "transpose") {
+      const t = <T,>(m: T[][], blank: T) => { const w = Math.max(...m.map((r) => r.length)); return Array.from({ length: w }, (_, j) => m.map((r) => r[j] ?? blank)); };
+      block = t(block, "");
+      if (styles) styles = t(styles, {} as Style);
+      // Formulas would point the wrong way once flipped: keep them only from outside.
+      if (internal) { internal = { ...internal, raw: block, styles: styles!, rows: [], c: 0 }; }
+    }
     if (!block.length) return;
+    const keepFormat = mode === "normal" || mode === "transpose";
+    const keepValues = mode !== "format";
     const s = selRect(d.sel);
     const bh = block.length;
     const bw = Math.max(...block.map((r) => r.length));
@@ -1805,20 +1897,22 @@ export class Grid {
       const dr = d.dataRow(disp);
       for (let j = 0; j < w; j++) {
         let v = fill ? block[0][0] : block[i][j] ?? "";
-        if (internal) {
+        if (internal && mode !== "values" && mode !== "transpose") {
           const srcR = internal.rows[fill ? 0 : i];
           const srcC = internal.c + (fill ? 0 : j);
           v = offsetFormula(v, dr - srcR, s.c0 + j - srcC);
+        }
+        if (internal && (keepFormat || mode === "format")) {
           // Formatting comes along when copying inside Bento.
-          const sty = fill ? internal.styles[0][0] : internal.styles[i]?.[j];
-          cells.push({ r: dr, c: s.c0 + j, v, style: d.intern(sty ?? {}) });
+          const sty = fill ? styles![0][0] : styles![i]?.[j];
+          cells.push(keepValues ? { r: dr, c: s.c0 + j, v, style: d.intern(sty ?? {}) } : { r: dr, c: s.c0 + j, style: d.intern(sty ?? {}) });
           continue;
         }
         cells.push({ r: dr, c: s.c0 + j, v });
       }
     }
     const after: Sel = { ar: s.r0, ac: s.c0, fr: s.r0 + h - 1, fc: s.c0 + w - 1 };
-    d.setCells(cells, "Paste", after);
+    d.setCells(cells, mode === "normal" ? "Paste" : "Paste special", after);
     this.select(after, false);
     this.hooks.onChange();
   }
@@ -1835,7 +1929,7 @@ export class Grid {
       if (!row) continue;
       for (let c = s.c0; c <= Math.min(s.c1, row.length - 1); c++) if (row[c] !== "") cells.push({ r: dr, c, v: "" });
     }
-    // Images in cells count as content.
+    // Images and checkboxes in cells count as content: Delete removes them.
     const sets: { r: number; c: number; v?: string; style?: number }[] = cells;
     for (const s of allRects(d.sel)) for (let r = s.r0; r <= Math.min(s.r1, lastData); r++) {
       const dr = d.dataRow(r);
@@ -1843,8 +1937,8 @@ export class Grid {
       if (!st) continue;
       for (let c = s.c0; c <= Math.min(s.c1, st.length - 1); c++) {
         const style = d.styles[st[c]];
-        if (!style?.img) continue;
-        const { img: _, ...rest } = style;
+        if (!style?.img && !style?.check) continue;
+        const { img: _, check: _c, ...rest } = style;
         const ex = sets.find((x) => x.r === dr && x.c === c);
         if (ex) ex.style = d.intern(rest); else sets.push({ r: dr, c, style: d.intern(rest) });
       }
@@ -1988,7 +2082,11 @@ export class Grid {
     const ed = this.editing;
     if (!ed) return;
     const replace = ed.mode === "replace";
-    if (e.key === "Enter" && !e.altKey) { e.preventDefault(); this.commitEdit(e.shiftKey ? -1 : 1, 0); }
+    if (e.key === "Enter" && !e.altKey) {
+      e.preventDefault();
+      const step = e.shiftKey ? -1 : 1;
+      if (this.enterRight) this.commitEdit(0, step); else this.commitEdit(step, 0);
+    }
     else if (e.key === "Enter" && e.altKey) {
       e.preventDefault();
       const t = this.editor;
@@ -2039,11 +2137,12 @@ export class Grid {
         const r = this.rowAt(y), c = this.colAt(x);
         const inside = zone === "cell" ? r >= s.r0 && r <= s.r1 && c >= s.c0 && c <= s.c1
           : zone === "col" ? c >= s.c0 && c <= s.c1 && this.isWholeCols(s)
-          : zone === "row" ? r >= s.r0 && r <= s.r1 : true;
+          : zone === "row" ? r >= s.r0 && r <= s.r1 && this.isWholeRows(s) : true;
         if (!inside) this.pointSelect(zone, x, y, false);
         return;
       }
       if (e.button !== 0) return;
+      if (!e.shiftKey && !e.ctrlKey && this.unhideAt(this.zoneAt(x, y), x, y)) return;
       if (this.nearFillHandle(x, y)) {
         this.drag = { kind: "fill", src: selRect(d.sel) };
         this.fillTarget = null;
@@ -2216,8 +2315,14 @@ export class Grid {
       const pic = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
       if (pic && this.hooks.onPasteImage) { this.hooks.onPasteImage(pic); return; }
       const t = e.clipboardData?.getData("text/plain");
-      if (t) this.paste(t);
+      const mode = this.pasteValuesNext ? "values" : "normal";
+      this.pasteValuesNext = false;
+      if (t) this.paste(t, mode);
     });
+    // Ctrl+Shift+V: the browser still fires "paste"; remember to drop formulas and formatting.
+    this.sink.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "v") this.pasteValuesNext = true;
+    }, true);
 
     this.editor.addEventListener("keydown", (e) => this.onEditorKey(e));
     this.editor.addEventListener("input", (e) => {

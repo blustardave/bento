@@ -3,13 +3,14 @@ import { Book, Doc, allRects, selRect } from "./doc";
 import { Encoding, decodeBytes, encodeText } from "./encoding";
 import { openFilter } from "./filter";
 import { FindPanel } from "./find";
-import { Grid } from "./grid";
+import { Grid, type PasteMode } from "./grid";
+import { ACCENTS, applyAccent } from "./accent";
 import { decodeBento, encodeBento, isBentoPath, looksLikeBento, sheetFromData, sheetToData } from "./bento";
 import {
   FileRef, isTauri, launchFiles, onFileDrop, onOpenFiles, pickFiles, pickSavePath, readFile,
   windowControls, writeFile,
 } from "./native";
-import { MenuItem, closeMenus, modal, showMenu, toast } from "./ui";
+import { MenuItem, closeMenus, formDialog, modal, showMenu, toast } from "./ui";
 import { ToolButton, divider, grow, toolButton } from "./toolbar";
 import { ZOOMS } from "./grid";
 import { AutoSaver, RecoveredFile, autoSaveEnabled } from "./autosave";
@@ -20,7 +21,7 @@ import { ObjectLayer, SHAPES } from "./objects";
 import { CHART_TYPES, chartData, dataRegion, parseRange, rangeText } from "./chart";
 import type { ChartObject, ChartType, ShapeObject, ShapeType, SheetObject } from "./doc";
 import { appVersion, initUpdater } from "./updater";
-import { basename, cellName, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
+import { basename, cellName, clamp, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 
 type Theme = "system" | "light" | "dusk" | "dark";
 const $ = (id: string) => document.getElementById(id)!;
@@ -64,7 +65,7 @@ export class App {
       onSelection: () => this.onSelection(),
       onChange: () => this.onChange(),
       onContextMenu: (zone, x, y) => this.contextMenu(zone, x, y),
-      onColumnMenu: (c, x, y) => this.columnMenu(c, x, y),
+      onColumnMenu: (_c, x, y) => this.columnMenu(x, y),
       onNotice: (t) => toast(t),
       onConfirm: async (title, message, yes) => !!(await modal(title, message, [{ label: "Cancel", value: false }, { label: yes, value: true, primary: true }])),
       onEditText: (t) => { if (document.activeElement !== this.cellInput) this.cellInput.value = t ?? this.activeRaw(); },
@@ -528,8 +529,16 @@ export class App {
     if (doc.protected) { toast(`"${doc.sheetName}" is protected — unprotect it first`); return; }
     const tab = document.querySelector<HTMLElement>(`.sheet-tab[data-sheet="${doc.book.sheets.indexOf(doc)}"]`);
     if (!tab) return;
-    const input = el("input", { class: "sheet-rename", value: doc.sheetName, spellcheck: "false" });
+    const input = el("input", { class: "sheet-rename", value: doc.sheetName, spellcheck: "false" }) as HTMLInputElement;
     tab.replaceWith(input);
+    // As wide as the name, growing as you type.
+    const measure = document.createElement("canvas").getContext("2d")!;
+    const fit = () => {
+      measure.font = getComputedStyle(input).font;
+      input.style.width = `${Math.ceil(Math.max(40, measure.measureText(input.value).width + 20))}px`;
+    };
+    fit();
+    input.addEventListener("input", fit);
     input.focus();
     input.select();
     let finished = false;
@@ -651,16 +660,20 @@ export class App {
         };
         const hold = window.setTimeout(lift, 220);
         const place = () => {
-          // Keep the tab inside the strip.
-          dx = Math.max(strip.left - me.left, Math.min(strip.right - me.right, dx));
+          // Keep the tab within the row of tabs (and the strip).
+          const minX = Math.max(strip.left, rects[0].left) - me.left;
+          const maxX = Math.min(strip.right, rects[rects.length - 1].right) - me.right;
+          dx = Math.max(minX, Math.min(maxX, dx));
           tab.style.transform = `translate(${dx}px, -2px)`;
-          const centre = me.left + me.width / 2 + dx;
+          // Swap with a neighbour once the leading edge passes its middle,
+          // so the ends are always reachable.
+          const left = me.left + dx, right = me.right + dx;
           to = i;
           for (let k = 0; k < rects.length; k++) {
             if (k === i) continue;
             const c = rects[k].left + rects[k].width / 2;
-            if (k > i && centre > c) to = k;
-            if (k < i && centre < c && to === i) to = k;
+            if (k > i && right > c) to = k;
+            if (k < i && left < c && to === i) to = k;
           }
           els.forEach((t, k) => {
             if (k === i) return;
@@ -917,6 +930,7 @@ export class App {
     const t = this.theme();
     const dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
     document.documentElement.dataset.theme = t === "dusk" ? "dusk" : dark ? "dark" : "light";
+    applyAccent(localStorage.getItem("bento.accent") ?? "clay", document.documentElement.dataset.theme as "light" | "dark" | "dusk");
     document.querySelectorAll<HTMLElement>("#theme-toggle button").forEach((b) => {
       const on = b.dataset.themeOpt === t;
       b.classList.toggle("on", on);
@@ -1129,55 +1143,197 @@ export class App {
     this.afterStructure();
   }
 
-  private preferences() {
+  private preferences(section = "appearance") {
     closeMenus();
-    const sel = el("select", { class: "field" });
-    const detected = detectCurrency().trim();
-    sel.append(el("option", { value: "auto", text: `Automatic (${detected}, from your Windows region)` }));
-    for (const [sym, name] of CURRENCIES) sel.append(el("option", { value: sym, text: `${sym.trim()}  ${name}` }));
-    sel.value = localStorage.getItem("bento.currency") ?? "auto";
-    const done = el("button", { class: "btn primary", text: "Done" });
-    const toggle = (key: string, label: string, hint: string, onByDefault = true) => {
-      const cb = el("input", { type: "checkbox" });
-      cb.checked = onByDefault ? localStorage.getItem(key) !== "off" : localStorage.getItem(key) === "on";
-      cb.addEventListener("change", () => localStorage.setItem(key, cb.checked ? "on" : "off"));
-      return el("label", { class: "pref-check" }, cb, el("span", {}, el("b", { text: label }), el("small", { text: hint })));
+    const isTauriApp = !document.getElementById("check-btn")!.hidden;
+    const row = (label: string, hint: string | null, control: HTMLElement) =>
+      el("div", { class: "prow" }, el("div", { class: "plabel" }, el("b", { text: label }), hint ? el("small", { text: hint }) : null), el("div", { class: "pctl" }, control));
+    const seg = (opts: [string, string][], value: string, onPick: (v: string) => void) => {
+      const box = el("div", { class: "segmented" });
+      for (const [v, label] of opts) {
+        const b = el("button", { text: label, class: v === value ? "on" : "" });
+        b.addEventListener("click", () => { box.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); onPick(v); });
+        box.append(b);
+      }
+      return box;
     };
-    const box = el("div", { class: "modal prefs", role: "dialog" },
-      el("h3", { text: "Preferences" }),
-      el("label", { class: "pref" }, el("span", { text: "Default currency" }), sel),
-      el("p", { class: "hint", text: "Used by the currency button in the toolbar." }),
-      toggle("bento.autosave", "AutoSave", "Saved .bento files save themselves as you work. CSVs are never overwritten; unsaved work is always kept safe for recovery."),
-      toggle("bento.autocomplete", "Autocomplete", "Suggest matching text from the same column as you type. Enter or Tab accepts; keep typing to ignore."),
-      el("div", { class: "foot" }, done),
+    const sw = (on: boolean, onFlip: (v: boolean) => void) => {
+      const cb = el("input", { type: "checkbox", class: "switch", role: "switch" }) as HTMLInputElement;
+      cb.checked = on;
+      cb.addEventListener("change", () => onFlip(cb.checked));
+      return cb;
+    };
+    const flag = (key: string, onByDefault = true) => onByDefault ? localStorage.getItem(key) !== "off" : localStorage.getItem(key) === "on";
+
+    /* Appearance */
+    const accent = el("div", { class: "accents" });
+    const curAccent = localStorage.getItem("bento.accent") ?? "clay";
+    for (const a of ACCENTS) {
+      const b = el("button", { class: "accent-swatch" + (a.id === curAccent ? " on" : ""), title: a.label, "aria-label": a.label });
+      b.style.setProperty("--sw", a.base);
+      b.addEventListener("click", () => {
+        localStorage.setItem("bento.accent", a.id);
+        accent.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+        accentName.textContent = a.label;
+        this.applyTheme();
+      });
+      accent.append(b);
+    }
+    const accentName = el("span", { class: "accent-name", text: ACCENTS.find((a) => a.id === curAccent)?.label ?? "Clay" });
+    const grid = el("input", { type: "range", min: "0", max: "100", step: "5", class: "slider", value: String(Math.round(this.grid.gridAlpha * 100)) }) as HTMLInputElement;
+    const gridVal = el("span", { class: "slider-val", text: `${grid.value}%` });
+    const paintSlider = () => grid.style.setProperty("--fill", `${grid.value}%`);
+    paintSlider();
+    grid.addEventListener("input", () => {
+      gridVal.textContent = `${grid.value}%`;
+      paintSlider();
+      localStorage.setItem("bento.gridOpacity", grid.value);
+      this.grid.gridAlpha = Number(grid.value) / 100;
+      this.grid.invalidate();
+    });
+    const appearance = el("div", { class: "psec" },
+      row("Theme", "Follow Windows, or pick one.", seg([["system", "System"], ["light", "Light"], ["dusk", "Dusk"], ["dark", "Dark"]], this.theme(), (v) => this.setTheme(v as Theme))),
+      row("Accent colour", "Selections, highlights and buttons.", el("div", { class: "accent-wrap" }, accent, accentName)),
+      row("Gridlines", "How strongly the lines between cells show. The header edges always stay.", el("div", { class: "slider-wrap" }, grid, gridVal)),
+      row("Toolbar", "Ctrl+Shift+F also shows and hides it.", sw(!document.getElementById("app")!.classList.contains("toolbar-hidden"), (v) => this.setToolbar(v))),
     );
+
+    /* Editing */
+    const cur = el("select", { class: "field" }) as HTMLSelectElement;
+    const detected = detectCurrency().trim();
+    cur.append(el("option", { value: "auto", text: `Automatic (${detected})` }));
+    for (const [sym, name] of CURRENCIES) cur.append(el("option", { value: sym, text: `${sym.trim()}  ${name}` }));
+    cur.value = localStorage.getItem("bento.currency") ?? "auto";
+    cur.addEventListener("change", () => { localStorage.setItem("bento.currency", cur.value); this.refreshToolbar(); this.grid.invalidate(); });
+    const editing = el("div", { class: "psec" },
+      row("After Enter, move", "Where the selection goes when you finish typing in a cell.", seg([["down", "Down"], ["right", "Right"]], this.grid.enterRight ? "right" : "down", (v) => { localStorage.setItem("bento.enterMoves", v); this.grid.enterRight = v === "right"; })),
+      row("Autocomplete", "Suggest matching text from the same column. Enter or Tab accepts; keep typing to ignore.", sw(flag("bento.autocomplete"), (v) => localStorage.setItem("bento.autocomplete", v ? "on" : "off"))),
+      row("Currency", `Used by the $ button in the toolbar. Automatic follows your Windows region (${detected}).`, cur),
+    );
+
+    /* Saving */
+    const saving = el("div", { class: "psec" },
+      row("AutoSave", "Saved .bento files save themselves as you work. CSVs are never overwritten without asking.", sw(flag("bento.autosave"), (v) => localStorage.setItem("bento.autosave", v ? "on" : "off"))),
+      row("Crash recovery", "Unsaved work is always kept safe in the background and offered back if Bento closes unexpectedly.", el("span", { class: "pnote", text: "Always on" })),
+    );
+
+    /* About */
+    const ver = el("span", { class: "pnote", text: "…" });
+    appVersion().then((v) => (ver.textContent = v));
+    const upd = el("button", { class: "btn", text: "Check now" });
+    upd.addEventListener("click", () => { close(); $("check-btn").click(); });
+    const keys = el("button", { class: "btn", text: "Show" });
+    keys.addEventListener("click", () => { close(); this.shortcuts(); });
+    const about = el("div", { class: "psec" },
+      row("Version", "Bento updates itself from GitHub.", ver),
+      ...(isTauriApp ? [row("Updates", "Look for a newer version now.", upd)] : []),
+      row("Keyboard shortcuts", "Also on F1.", keys),
+    );
+
+    const sections: [string, string, HTMLElement][] = [
+      ["appearance", "Appearance", appearance],
+      ["editing", "Editing", editing],
+      ["saving", "Saving", saving],
+      ["about", "About", about],
+    ];
+    const nav = el("nav", { class: "pnav" });
+    const pane = el("div", { class: "ppane" });
+    const head = el("h4", { class: "phead" });
+    const show = (id: string) => {
+      const sec = sections.find((x) => x[0] === id) ?? sections[0];
+      nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.sec === sec[0]));
+      head.textContent = sec[1];
+      pane.replaceChildren(head, sec[2]);
+    };
+    for (const [id, label] of sections) {
+      const b = el("button", { text: label, "data-sec": id });
+      b.addEventListener("click", () => show(id));
+      nav.append(b);
+    }
+    const x = el("button", { class: "icon-btn pclose", title: "Close (Esc)", "aria-label": "Close" });
+    x.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg>';
+    const box = el("div", { class: "modal prefs2", role: "dialog" },
+      el("div", { class: "pside" }, el("h3", { text: "Preferences" }), nav),
+      pane, x);
     const scrim = el("div", { class: "scrim" }, box);
     const close = () => { scrim.remove(); window.removeEventListener("keydown", onKey, true); this.grid.focus(); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" || (e.key === "Enter" && document.activeElement !== sel)) { e.preventDefault(); e.stopPropagation(); close(); } };
-    sel.addEventListener("change", () => { localStorage.setItem("bento.currency", sel.value); this.refreshToolbar(); this.grid.invalidate(); });
-    done.addEventListener("click", close);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+      else e.stopPropagation();
+    };
+    x.addEventListener("click", close);
     scrim.addEventListener("pointerdown", (e) => { if (e.target === scrim) close(); });
     window.addEventListener("keydown", onKey, true);
+    show(section);
     document.body.append(scrim);
-    sel.focus();
+    box.tabIndex = -1;
+    box.focus();
   }
 
   private shortcuts() {
-    modal("Keyboard shortcuts", [
-      "Type to replace a cell  ·  Enter or F2 to edit",
-      "Enter / Tab  commit and move  ·  Alt+Enter  new line",
-      "Ctrl+Arrows  jump to edge of data  ·  Shift  extend",
-      "Ctrl+C / X / V  copy, cut, paste  ·  Ctrl+D  fill down",
-      "Ctrl+Z / Ctrl+Y  undo, redo  ·  Delete  clear",
-      "Ctrl+F / Ctrl+H  find, replace  ·  Ctrl+A  select all",
-      "Ctrl+B / I / U  bold, italic, underline  ·  Alt+Shift+5  strikethrough",
-      "Ctrl+Shift+L / E / R  align left, centre, right  ·  Ctrl+\\  clear formatting",
-      "Ctrl+S  save (.bento)  ·  Ctrl+E  export CSV  ·  Ctrl+O  open  ·  Ctrl+N  new",
-      "Ctrl+Tab  next file  ·  Ctrl+PgDn / PgUp  next sheet  ·  Ctrl+W  close",
-      "Ctrl+Alt+−  delete selected rows/columns  ·  Ctrl+Shift+F  hide toolbar",
-      "Ctrl+G  go to a cell, range or sheet  ·  drag a selection's edge to move it (Ctrl copies)",
-      "Formulas start with =, e.g. =SUM(B2:B100)",
-    ].join("\n"), [{ label: "Done", value: true, primary: true }]);
+    closeMenus();
+    // "~" marks a mouse action (shown as text, not keys).
+    const groups: [string, [string, string][]][] = [
+      ["Editing", [
+        ["Edit cell", "F2 / Enter"], ["New line in a cell", "Alt+Enter"], ["Confirm and move", "Enter / Tab"],
+        ["Cancel editing", "Esc"], ["Clear cells", "Delete"], ["Fill down", "Ctrl+D"],
+        ["Undo", "Ctrl+Z"], ["Redo", "Ctrl+Y"],
+      ]],
+      ["Clipboard", [
+        ["Copy", "Ctrl+C"], ["Cut", "Ctrl+X"], ["Paste", "Ctrl+V"], ["Paste values only", "Ctrl+Shift+V"],
+        ["Move cells", "~Drag the selection's edge"], ["Copy cells", "~Ctrl-drag the edge"],
+      ]],
+      ["Moving around", [
+        ["Jump to edge of data", "Ctrl+Arrow"], ["Extend selection", "Shift+Arrow"], ["Select all", "Ctrl+A"],
+        ["Go to a cell or range", "Ctrl+G"], ["Add another range", "~Ctrl-click"],
+      ]],
+      ["Formatting", [
+        ["Bold", "Ctrl+B"], ["Italic", "Ctrl+I"], ["Underline", "Ctrl+U"], ["Strikethrough", "Alt+Shift+5"],
+        ["Align left", "Ctrl+Shift+L"], ["Align centre", "Ctrl+Shift+E"], ["Align right", "Ctrl+Shift+R"],
+        ["Clear formatting", "Ctrl+\\"],
+      ]],
+      ["Rows, columns & sheets", [
+        ["Delete rows or columns", "Ctrl+Alt+−"], ["Next sheet", "Ctrl+PgDn"], ["Previous sheet", "Ctrl+PgUp"],
+        ["Tick checkboxes", "Space"], ["Open a dropdown", "Alt+↓"],
+      ]],
+      ["Files & view", [
+        ["New", "Ctrl+N"], ["Open", "Ctrl+O"], ["Save", "Ctrl+S"], ["Save as", "Ctrl+Shift+S"], ["Export CSV", "Ctrl+E"],
+        ["Find", "Ctrl+F"], ["Find and replace", "Ctrl+H"], ["Next file", "Ctrl+Tab"], ["Close file", "Ctrl+W"],
+        ["Zoom", "~Ctrl + scroll"], ["Hide the toolbar", "Ctrl+Shift+F"], ["Preferences", "Ctrl+,"],
+      ]],
+    ];
+    const keyEl = (combo: string) => {
+      const span = el("span", { class: "keys" });
+      if (combo.startsWith("~")) { span.append(el("span", { class: "mouse", text: combo.slice(1) })); return span; }
+      combo.split(" / ").forEach((alt, i) => {
+        if (i) span.append(el("span", { class: "or", text: "or" }));
+        // "Ctrl+B / I / U" style: later parts are just keys.
+        alt.split("+").forEach((k, j) => {
+          if (j) span.append(el("span", { class: "plus", text: "+" }));
+          span.append(el("kbd", { text: k }));
+        });
+      });
+      return span;
+    };
+    const cols = el("div", { class: "kgrid" });
+    for (const [title, rows] of groups) {
+      const sec = el("section", {}, el("h4", { text: title }));
+      for (const [what, combo] of rows) sec.append(el("div", { class: "krow" }, el("span", { class: "what", text: what }), keyEl(combo)));
+      cols.append(sec);
+    }
+    const x = el("button", { class: "icon-btn pclose", title: "Close (Esc)", "aria-label": "Close" });
+    x.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg>';
+    const box = el("div", { class: "modal shortcuts", role: "dialog" },
+      el("h3", { text: "Keyboard shortcuts" }),
+      el("p", { class: "ksub", text: "Formulas start with =, for example =SUM(B2:B100)." }),
+      cols, x);
+    const scrim = el("div", { class: "scrim" }, box);
+    const close = () => { scrim.remove(); window.removeEventListener("keydown", onKey, true); this.grid.focus(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" || e.key === "Enter" || e.key === "F1") { e.preventDefault(); e.stopPropagation(); close(); } else e.stopPropagation(); };
+    x.addEventListener("click", close);
+    scrim.addEventListener("pointerdown", (e) => { if (e.target === scrim) close(); });
+    window.addEventListener("keydown", onKey, true);
+    document.body.append(scrim);
   }
 
   /** Data rows covered by the selection (filter-aware). */
@@ -1189,102 +1345,244 @@ export class App {
     return out;
   }
 
-  private rowItems(): MenuItem[] {
+  private rowItems() {
     const d = this.active!;
     const s = selRect(d.sel);
     const n = s.r1 - s.r0 + 1;
     const rows = n === 1 ? "row" : `${formatInt(n)} rows`;
-    return [
-      { label: `Insert ${rows} above`, action: () => { d.insertRows(d.dataRow(s.r0), n); this.afterStructure(); } },
-      { label: `Insert ${rows} below`, action: () => {
+    const item = (label: string, action: () => void, extra: Partial<Extract<MenuItem, { label: string }>> = {}) => ({ label, action, icon: undefined, ...extra }) as Extract<MenuItem, { label: string }>;
+    return {
+      above: item(`Insert ${rows} above`, () => { d.insertRows(d.dataRow(s.r0), n); this.afterStructure(); }, { icon: ROWCOL_ICONS.above }),
+      below: item(`Insert ${rows} below`, () => {
         d.insertRows(d.dataRow(s.r1) + 1, n);
         this.grid.select({ ar: s.r1 + 1, ac: d.sel.ac, fr: s.r1 + n, fc: d.sel.fc }, false);
         this.afterStructure();
-      } },
-      { label: `Delete ${rows}`, danger: true, action: () => { d.deleteRows(this.selectedDataRows()); this.afterStructure(); } },
-    ];
+      }, { icon: ROWCOL_ICONS.below }),
+      del: item(n === 1 ? "Delete row" : `Delete ${rows}`, () => { d.deleteRows(this.selectedDataRows()); this.afterStructure(); }, { danger: true }),
+    };
   }
 
-  private colItems(): MenuItem[] {
+  private colItems() {
     const d = this.active!;
     const s = selRect(d.sel);
     const n = s.c1 - s.c0 + 1;
     const cols = n === 1 ? "column" : `${n} columns`;
-    return [
-      { label: `Insert ${cols} left`, action: () => { d.insertCols(s.c0, n); this.afterStructure(); } },
-      { label: `Insert ${cols} right`, action: () => {
+    const item = (label: string, action: () => void, extra: Partial<Extract<MenuItem, { label: string }>> = {}) => ({ label, action, ...extra }) as Extract<MenuItem, { label: string }>;
+    return {
+      left: item(`Insert ${cols} left`, () => { d.insertCols(s.c0, n); this.afterStructure(); }, { icon: ROWCOL_ICONS.left }),
+      right: item(`Insert ${cols} right`, () => {
         d.insertCols(s.c1 + 1, n);
         this.grid.select({ ar: d.sel.ar, ac: s.c1 + 1, fr: d.sel.fr, fc: s.c1 + n }, false);
         this.afterStructure();
-      } },
-      { label: `Delete ${cols}`, danger: true, action: () => { d.deleteCols(s.c0, n); this.afterStructure(); } },
+      }, { icon: ROWCOL_ICONS.right }),
+      del: item(n === 1 ? "Delete column" : `Delete ${cols}`, () => { d.deleteCols(s.c0, n); this.afterStructure(); }, { danger: true }),
+    };
+  }
+
+  /** Cut / Copy / Paste / Paste special. */
+  private clipboardItems(): MenuItem[] {
+    return [
+      { label: "Cut", key: "Ctrl+X", action: () => this.clipboardWrite(this.grid.copy(true)) },
+      { label: "Copy", key: "Ctrl+C", action: () => this.clipboardWrite(this.grid.copy()) },
+      { label: "Paste", key: "Ctrl+V", action: () => this.clipboardPaste() },
+      { label: "Paste special", children: [
+        { label: "Values only", key: "Ctrl+Shift+V", action: () => this.clipboardPaste("values") },
+        { label: "Formatting only", action: () => this.clipboardPaste("format") },
+        { label: "Without formatting", action: () => this.clipboardPaste("plain") },
+        "sep",
+        { label: "Transposed", action: () => this.clipboardPaste("transpose") },
+      ] },
     ];
   }
 
   private contextMenu(zone: "cell" | "col" | "row" | "corner", x: number, y: number) {
     const d = this.active;
     if (!d || d.loading !== null) return;
-    if (zone === "col") { this.columnMenu(d.sel.ac, x, y); return; }
-    const clipboard: MenuItem[] = [
-      { label: "Cut", key: "Ctrl+X", action: () => this.clipboardWrite(this.grid.copy(true)) },
-      { label: "Copy", key: "Ctrl+C", action: () => this.clipboardWrite(this.grid.copy()) },
-      { label: "Paste", key: "Ctrl+V", action: () => this.clipboardPaste() },
-    ];
+    if (zone === "col") { this.columnMenu(x, y); return; }
+    if (zone === "row") { this.rowMenu(x, y); return; }
     if (zone === "corner") {
       showMenu([
         { label: "Select all", key: "Ctrl+A", action: () => this.grid.selectAll() },
         { label: "Clear all filters", disabled: !d.filters.size, action: () => { d.clearFilters(); this.afterStructure(); } },
+        { label: "Unhide all rows", disabled: !d.hiddenRowCount(), action: () => this.unhideRows() },
         { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.hidden.clear(); this.onChange(); } },
       ], x, y);
       return;
     }
-    if (zone === "row") {
-      showMenu([
-        ...clipboard, "sep", ...this.rowItems(), "sep",
-        { label: `Freeze up to row ${formatInt(d.dataRow(selRect(d.sel).r1) + 1)}`, action: () => { d.setFrozen(d.dataRow(selRect(d.sel).r1) + 1, d.frozenCols); this.afterFreeze(); } },
-        ...(d.frozenRows ? [{ label: "Unfreeze rows", action: () => { d.setFrozen(0, d.frozenCols); this.afterFreeze(); } } as MenuItem] : []),
-      ], x, y);
-      return;
-    }
+    const rows = this.rowItems(), cols = this.colItems();
+    const st = d.style(d.dataRow(d.sel.ar), d.sel.ac);
+    const extras: MenuItem[] = [];
+    if (st.list) extras.push({ label: "Edit dropdown…", action: () => this.dropdownDialog() });
+    if (this.selectionHasChecks()) extras.push({ label: "Remove checkboxes", action: () => this.applyFormat((s) => ({ ...s, check: undefined }), "Remove checkboxes") });
     showMenu([
-      ...clipboard, "sep",
-      ...this.rowItems().slice(0, 1), ...this.colItems().slice(0, 1), "sep",
-      this.rowItems()[2], this.colItems()[2],
-      { label: "Clear cells", key: "Delete", action: () => this.grid.clear() },
-      { label: "Clear formatting", key: "Ctrl+\\", action: () => this.applyFormat(() => ({}), "Clear formatting") },
+      ...this.clipboardItems(),
       "sep",
-      ...this.insertItems(),
+      { label: "Insert", children: [
+        rows.above, rows.below, cols.left, cols.right,
+        "sep",
+        ...this.insertItems(),
+      ] },
+      { label: "Delete", children: [rows.del, cols.del] },
+      { label: "Clear", children: [
+        { label: "Contents", key: "Delete", action: () => this.grid.clear() },
+        { label: "Formatting", key: "Ctrl+\\", action: () => this.applyFormat(() => ({}), "Clear formatting") },
+        { label: "Everything", action: () => { this.grid.clear(); this.applyFormat(() => ({}), "Clear formatting"); } },
+      ] },
       "sep",
+      ...extras,
       { label: "Fill down", key: "Ctrl+D", action: () => this.grid.fillDown() },
     ], x, y);
+  }
+
+  private selectionHasChecks(): boolean {
+    const d = this.active!;
+    for (const rect of allRects(d.sel))
+      for (let r = rect.r0; r <= Math.min(rect.r1, rect.r0 + 2000); r++)
+        for (let c = rect.c0; c <= Math.min(rect.c1, rect.c0 + 200); c++) if (d.style(d.dataRow(r), c).check) return true;
+    return false;
+  }
+
+  private columnMenu(x: number, y: number) {
+    const d = this.active;
+    if (!d || d.loading !== null) return;
+    const s = selRect(d.sel);
+    const c = d.sel.ac;
+    const n = s.c1 - s.c0 + 1;
+    const what = n === 1 ? "column" : `${n} columns`;
+    const cols = this.colItems();
+    const hideRange = () => {
+      for (let i = s.c0; i <= s.c1; i++) d.hidden.add(i);
+      d.version++;
+      // Move the selection off the hidden columns.
+      const next = s.c1 + 1 < d.displayCols() ? s.c1 + 1 : Math.max(0, s.c0 - 1);
+      this.grid.select({ ar: d.sel.ar, ac: next, fr: d.sel.ar, fc: next }, false);
+      this.onChange();
+    };
+    showMenu([
+      ...this.clipboardItems(),
+      "sep",
+      cols.left, cols.right,
+      { ...cols.del, label: `Delete ${what}` },
+      { label: `Clear ${what}`, action: () => this.grid.clear() },
+      { label: `Hide ${what}`, action: hideRange },
+      { label: `Resize ${what}…`, action: () => this.resizeDialog("col") },
+      "sep",
+      { label: "Sort sheet A → Z", action: () => this.sort(d, c, false) },
+      { label: "Sort sheet Z → A", action: () => this.sort(d, c, true) },
+      "sep",
+      { label: "More", children: [
+        { label: d.filters.has(c) ? "Edit filter…" : "Filter…", action: () => openFilter(d, c, x, y, () => this.afterStructure()) },
+        ...(d.filters.has(c) ? [{ label: "Remove filter", action: () => { d.setFilter(c, null); this.afterStructure(); } } as MenuItem] : []),
+        "sep",
+        { label: `Freeze up to column ${colName(s.c1)}`, action: () => { d.setFrozen(d.frozenRows, s.c1 + 1); this.afterFreeze(); } },
+        { label: "Unfreeze columns", disabled: !d.frozenCols, action: () => { d.setFrozen(d.frozenRows, 0); this.afterFreeze(); } },
+        { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.hidden.clear(); this.onChange(); } },
+      ] },
+    ], x, y);
+  }
+
+  private rowMenu(x: number, y: number) {
+    const d = this.active;
+    if (!d || d.loading !== null) return;
+    const s = selRect(d.sel);
+    const n = s.r1 - s.r0 + 1;
+    const what = n === 1 ? "row" : `${formatInt(n)} rows`;
+    const rows = this.rowItems();
+    const c = d.sel.ac;
+    const lastRow = d.dataRow(s.r1) + 1;
+    showMenu([
+      ...this.clipboardItems(),
+      "sep",
+      rows.above, rows.below,
+      { ...rows.del, label: `Delete ${what}` },
+      { label: `Clear ${what}`, action: () => this.grid.clear() },
+      { label: `Hide ${what}`, action: () => this.hideRows() },
+      { label: `Resize ${what}…`, action: () => this.resizeDialog("row") },
+      "sep",
+      { label: "Sort sheet A → Z", key: `by ${colName(c)}`, action: () => this.sort(d, c, false) },
+      { label: "Sort sheet Z → A", key: `by ${colName(c)}`, action: () => this.sort(d, c, true) },
+      "sep",
+      { label: "More", children: [
+        { label: `Freeze up to row ${formatInt(lastRow)}`, action: () => { d.setFrozen(lastRow, d.frozenCols); this.afterFreeze(); } },
+        { label: "Unfreeze rows", disabled: !d.frozenRows, action: () => { d.setFrozen(0, d.frozenCols); this.afterFreeze(); } },
+        { label: "Unhide all rows", disabled: !d.hiddenRowCount(), action: () => this.unhideRows() },
+      ] },
+    ], x, y);
+  }
+
+  private hideRows() {
+    const d = this.active!;
+    const rows = this.selectedDataRows().filter((r) => r < d.rows.length || (d.rows.length <= r && false));
+    // Rows past the data need to exist before they can be hidden.
+    const s = selRect(d.sel);
+    const want = rows.length ? rows : [];
+    if (!want.length) for (let r = s.r0; r <= s.r1; r++) want.push(d.dataRow(r));
+    while (d.rows.length <= Math.max(...want)) d.rows.push(new Array(d.cols).fill(""));
+    if (want.length >= d.displayRows()) { toast("At least one row has to stay visible"); return; }
+    d.setRowsHidden(want, true);
+    this.grid.select({ ar: s.r0, ac: d.sel.ac, fr: s.r0, fc: d.sel.ac }, false);
+    this.afterStructure();
+    toast(`${want.length === 1 ? "Row" : `${formatInt(want.length)} rows`} hidden — right-click a row number → More to unhide`);
+  }
+
+  private unhideRows() {
+    const d = this.active!;
+    d.setRowsHidden("all", false);
+    this.afterStructure();
+  }
+
+  /** Type a width/height, or fit to the content. */
+  private resizeDialog(axis: "col" | "row") {
+    const d = this.active;
+    if (!d) return;
+    const s = selRect(d.sel);
+    const z = this.grid.zoom;
+    void z;
+    const isCol = axis === "col";
+    const n = isCol ? s.c1 - s.c0 + 1 : s.r1 - s.r0 + 1;
+    const current = isCol ? d.width(s.c0) : (d.rowHeight(d.dataRow(s.r0)) || 26);
+    const title = isCol
+      ? (n === 1 ? `Resize column ${colName(s.c0)}` : `Resize columns ${colName(s.c0)}–${colName(s.c1)}`)
+      : (n === 1 ? `Resize row ${formatInt(d.dataRow(s.r0) + 1)}` : `Resize rows ${formatInt(d.dataRow(s.r0) + 1)}–${formatInt(d.dataRow(s.r1) + 1)}`);
+    const input = el("input", { class: "field num", type: "number", min: isCol ? "20" : "12", max: isCol ? "2000" : "1000", value: String(Math.round(current)) }) as HTMLInputElement;
+    const mode = { v: "set" as "set" | "fit" };
+    const setOpt = el("label", { class: "radio" }, el("input", { type: "radio", name: "rz", checked: "" }), el("span", { text: isCol ? "Width" : "Height" }), el("span", { class: "with-unit" }, input, el("span", { class: "unit", text: "px" })));
+    const fitOpt = el("label", { class: "radio" }, el("input", { type: "radio", name: "rz" }), el("span", { text: isCol ? "Fit width to content" : "Fit height to content" }));
+    const radios = [setOpt, fitOpt].map((l) => l.querySelector("input") as HTMLInputElement);
+    radios[0].addEventListener("change", () => { mode.v = "set"; input.focus(); });
+    radios[1].addEventListener("change", () => { mode.v = "fit"; });
+    input.addEventListener("focus", () => { radios[0].checked = true; mode.v = "set"; });
+    const apply = () => {
+      if (mode.v === "set") {
+        const v = Number(input.value);
+        if (!Number.isFinite(v) || v <= 0) { input.focus(); return false; }
+        if (isCol) { for (let c = s.c0; c <= s.c1; c++) d.widths.set(c, clamp(Math.round(v), 20, 2000)); d.remeasureAll(); d.version++; this.grid.invalidate(); this.onChange(); }
+        else { d.setRowHeights(this.selectedDataRows(), clamp(Math.round(v), 12, 1000)); this.onChange(); }
+      } else {
+        if (isCol) for (let c = s.c0; c <= s.c1; c++) this.grid.autoFit(c);
+        else { d.setRowHeights(this.selectedDataRows(), null, "Fit rows"); this.onChange(); }
+      }
+      return true;
+    };
+    formDialog(title, el("div", { class: "resize-opts" }, setOpt, fitOpt), "OK", apply, () => this.grid.focus());
+    input.select();
   }
 
   /* ------------------------------- inserting ------------------------------- */
 
   /** Chart / image / shape / dropdown / checkbox items for the cell menu. */
   private insertItems(): MenuItem[] {
-    const d = this.active!;
-    const st = d.style(d.dataRow(d.sel.ar), d.sel.ac);
-    let anyCheck = false;
-    for (const rect of allRects(d.sel)) {
-      for (let r = rect.r0; r <= Math.min(rect.r1, rect.r0 + 2000) && !anyCheck; r++)
-        for (let c = rect.c0; c <= Math.min(rect.c1, rect.c0 + 200) && !anyCheck; c++) if (d.style(d.dataRow(r), c).check) anyCheck = true;
-    }
     return [
-      { label: "Chart", children: CHART_TYPES.map(({ type, label }) => ({ label, icon: CHART_ICONS[type], action: () => this.insertChart(type) })) },
-      { label: "Image", children: [
-        { label: "Image in cell", icon: IMG_ICONS.cell, action: () => this.pickImage("cell") },
-        { label: "Image over cells", icon: IMG_ICONS.over, action: () => this.pickImage("over") },
+      { label: "Chart", icon: CHART_ICONS.column, children: CHART_TYPES.map(({ type, label }) => ({ label, icon: CHART_ICONS[type], action: () => this.insertChart(type) })) },
+      { label: "Image", icon: IMG_ICONS.cell, children: [
+        { label: "In cell", icon: IMG_ICONS.cell, action: () => this.pickImage("cell") },
+        { label: "Over cells", icon: IMG_ICONS.over, action: () => this.pickImage("over") },
       ] },
-      { label: "Shape", children: [
-        ...SHAPES.map(({ shape, label, icon }) => ({ label, icon, action: () => this.insertShape(shape) }) as MenuItem),
-        "sep",
-        { label: "Text box", icon: IMG_ICONS.text, action: () => this.insertShape("text") },
-      ] },
-      { label: st.list ? "Edit dropdown…" : "Dropdown…", action: () => this.dropdownDialog() },
-      anyCheck
-        ? { label: "Remove checkboxes", action: () => this.applyFormat((s) => ({ ...s, check: undefined }), "Remove checkboxes") }
-        : { label: "Checkbox", action: () => this.insertCheckboxes() },
+      { label: "Shape", icon: SHAPES[1].icon, children: SHAPES.map(({ shape, label, icon }) => ({ label, icon, action: () => this.insertShape(shape) }) as MenuItem) },
+      { label: "Text box", icon: IMG_ICONS.text, action: () => this.insertShape("text") },
+      "sep",
+      { label: "Dropdown…", icon: IMG_ICONS.dropdown, action: () => this.dropdownDialog() },
+      { label: "Checkbox", icon: IMG_ICONS.check, action: () => this.insertCheckboxes() },
     ];
   }
 
@@ -1578,39 +1876,16 @@ export class App {
     range.select();
   }
 
-  private columnMenu(c: number, x: number, y: number) {
-    const d = this.active;
-    if (!d || d.loading !== null) return;
-    const s = selRect(d.sel);
-    const hideRange = () => { for (let i = s.c0; i <= s.c1; i++) d.hidden.add(i); this.onChange(); };
-    showMenu([
-      { label: "Sort A → Z", action: () => this.sort(d, c, false) },
-      { label: "Sort Z → A", action: () => this.sort(d, c, true) },
-      "sep",
-      { label: d.filters.has(c) ? "Edit filter…" : "Filter…", action: () => openFilter(d, c, x, y, () => this.afterStructure()) },
-      ...(d.filters.has(c) ? [{ label: "Remove filter", action: () => { d.setFilter(c, null); this.afterStructure(); } } as MenuItem] : []),
-      "sep",
-      ...this.colItems(),
-      "sep",
-      { label: `Freeze up to column ${colName(s.c1)}`, action: () => { d.setFrozen(d.frozenRows, s.c1 + 1); this.afterFreeze(); } },
-      ...(d.frozenCols ? [{ label: "Unfreeze columns", action: () => { d.setFrozen(d.frozenRows, 0); this.afterFreeze(); } } as MenuItem] : []),
-      "sep",
-      { label: s.c0 === s.c1 ? "Hide column" : "Hide columns", action: hideRange },
-      ...(d.hidden.size ? [{ label: "Unhide all columns", action: () => { d.hidden.clear(); this.onChange(); } } as MenuItem] : []),
-      { label: "Fit width to content", action: () => { for (let i = s.c0; i <= s.c1; i++) this.grid.autoFit(i); } },
-    ], x, y);
-  }
-
   private async clipboardWrite(text: string | null) {
     if (text === null) { if (!this.active?.sel.extra?.length) toast("That selection is too big to copy", true); return; }
     try { await navigator.clipboard.writeText(text); } catch { toast("Couldn't reach the clipboard — try Ctrl+C", true); }
     this.onChange();
   }
 
-  private async clipboardPaste() {
+  private async clipboardPaste(mode: PasteMode = "normal") {
     try {
       const t = await navigator.clipboard.readText();
-      if (t) this.grid.paste(t);
+      if (t) this.grid.paste(t, mode);
     } catch {
       toast("Use Ctrl+V to paste");
     }
@@ -1846,6 +2121,14 @@ const IMG_ICONS = {
   cell: '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="m4.5 11 2.5-3 2 2 1.25-1.5L12 11"/></svg>',
   over: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M2.5 6h11M6 2.5v11" opacity=".45"/><rect x="5" y="5" width="8.5" height="8" rx="1.25"/><path d="m6.5 11.5 2-2.25 1.5 1.5 1-1 1 1.75"/></svg>',
   text: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4.5h8M8 4.5v8"/></svg>',
+  dropdown: '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="4.5" width="12" height="7" rx="3.5"/><path d="m9.25 7.25 1.25 1.25 1.25-1.25"/></svg>',
+  check: '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="3" y="3" width="10" height="10" rx="2.25"/><path d="m5.75 8.25 1.6 1.6 3-3.35"/></svg>',
+};
+const ROWCOL_ICONS = {
+  above: '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="2.5" y="8.5" width="11" height="5" rx="1"/><path d="M8 2.5v4M6 4.5h4"/></svg>',
+  below: '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="2.5" y="2.5" width="11" height="5" rx="1"/><path d="M8 9.5v4M6 11.5h4"/></svg>',
+  left: '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="8.5" y="2.5" width="5" height="11" rx="1"/><path d="M2.5 8h4M4.5 6v4"/></svg>',
+  right: '<svg viewBox="0 0 16 16" width="14" height="14"><rect x="2.5" y="2.5" width="5" height="11" rx="1"/><path d="M9.5 8h4M11.5 6v4"/></svg>',
 };
 
 /** A small coloured circle for colour menus. */
