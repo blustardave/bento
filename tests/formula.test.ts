@@ -189,5 +189,18 @@ book.renameSheet(s1, "Fruit stall");
 eq(s2.raw(5, 0), "='Fruit stall'!B3", "rename sheet rewrites refs");
 eq(book.names.get("QTY")!.ref, "'Fruit stall'!$B$2:$B$5", "rename sheet rewrites names");
 
+// Sorting moves formulas like copies: their own-row references follow them.
+{
+  const b2 = new Book("s", null);
+  const d = new Doc("s", null, b2); b2.sheets.push(d);
+  d.load([["5", "1", "=A1-B1"], ["2", "9", "=A2-B2"], ["7", "3", "=A3-B3"]]);
+  d.sortBy(2, false);
+  eq(d.rows.map((r) => r[2]), ["=A1-B1", "=A2-B2", "=A3-B3"], "sorted formulas point at their own rows");
+  eq([0, 1, 2].map((r) => d.display(r, 2)), ["-7", "4", "4"], "sorted results");
+  eq(d.rows.map((r) => r[0]), ["2", "5", "7"], "sorted rows");
+  d.undo();
+  eq(d.rows.map((r) => r[2] + "|" + r[0]), ["=A1-B1|5", "=A2-B2|2", "=A3-B3|7"], "undo sort");
+}
+
 console.log(fails ? `${fails} FAILED` : "FORMULAS PASS");
 if (fails) process.exitCode = 1;

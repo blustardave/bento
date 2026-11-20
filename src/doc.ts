@@ -1,6 +1,6 @@
 import { Delimiter, LineEnding, serialize } from "./csv";
 import { Encoding } from "./encoding";
-import { Engine, remapFormula, renameSheetInFormula, shiftFormula } from "./formula";
+import { Engine, offsetFormula, remapFormula, renameSheetInFormula, shiftFormula } from "./formula";
 import { Style, isEmptyStyle, styleKey } from "./format";
 import { parseNum } from "./util";
 
@@ -919,6 +919,7 @@ export class Doc {
     if (this.rows.length - start < 2) return true;
     if (this.merges.some((m) => m.r1 >= start && m.r1 > m.r0)) return false;
     let before: string[][] = [];
+    let edits: { row: string[]; c: number; was: string }[] = [];
     this.push({
       label: "Sort",
       selBefore: { ...this.sel },
@@ -928,7 +929,7 @@ export class Doc {
         const keys = body.map((row, i) => {
           const disp = row[col] === undefined ? "" : row[col].charCodeAt(0) === 61 ? this.engine.display(i + start, col) : row[col];
           const n = parseNum(disp);
-          return { row, s: disp, n, blank: disp === "" };
+          return { row, s: disp, n, blank: disp === "", from: i + start };
         });
         const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
         const dir = desc ? -1 : 1;
@@ -940,6 +941,20 @@ export class Doc {
           return coll.compare(a.s, b.s) * dir;
         });
         this.rows = [...this.rows.slice(0, start), ...keys.map((k) => k.row)];
+        // Formulas move like copied cells: =F185-G185 that lands in row 2 becomes =F2-G2
+        // (relative parts follow the row; $-anchored parts stay put), as in Excel and Sheets.
+        edits = [];
+        keys.forEach((k, j) => {
+          const dr = j + start - k.from;
+          if (!dr) return;
+          const row = k.row;
+          for (let c = 0; c < row.length; c++) {
+            const v = row[c];
+            if (v.charCodeAt(0) !== 61) continue;
+            const nv = offsetFormula(v, dr, 0);
+            if (nv !== v) { edits.push({ row, c, was: v }); row[c] = nv; }
+          }
+        });
         this.engine.structureChanged();
         // Single-row merges travel with their rows.
         if (this.merges.length) {
@@ -953,7 +968,11 @@ export class Doc {
         }
         this.refreshView();
       },
-      undo: () => { this.rows = before; this.engine.structureChanged(); },
+      undo: () => {
+        for (const e of edits) e.row[e.c] = e.was;
+        this.rows = before;
+        this.engine.structureChanged();
+      },
     });
     return true;
   }
