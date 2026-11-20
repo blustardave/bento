@@ -4,6 +4,10 @@ import { Encoding, decodeBytes, encodeText } from "./encoding";
 import { openFilter } from "./filter";
 import { FindPanel } from "./find";
 import { Grid, type PasteMode } from "./grid";
+import { Engine, FUNCS } from "./formula";
+import { FormulaAssist } from "./fassist";
+import { absRef, defineName, evaluateDialog, nameProblem, namesDialog } from "./formulatools";
+import { validName } from "./fcore";
 import { ACCENTS, applyAccent } from "./accent";
 import { decodeBento, encodeBento, isBentoPath, looksLikeBento, sheetFromData, sheetToData } from "./bento";
 import {
@@ -481,6 +485,7 @@ export class App {
     const sheet = this.makeSheet(book, book.freshName());
     book.sheets.splice(book.current + 1, 0, sheet);
     book.structureDirty = true;
+    book.recalcAll();
     this.showSheet(sheet);
   }
 
@@ -492,6 +497,7 @@ export class App {
     copy.remeasureAll();
     book.sheets.splice(book.sheets.indexOf(doc) + 1, 0, copy);
     book.structureDirty = true;
+    book.recalcAll();
     this.showSheet(copy);
   }
 
@@ -509,6 +515,7 @@ export class App {
     const i = book.sheets.indexOf(doc);
     book.sheets.splice(i, 1);
     book.structureDirty = true;
+    book.recalcAll();
     const next = book.sheets[Math.min(i, book.sheets.length - 1)];
     if (this.active === doc) this.showSheet(next);
     else this.render();
@@ -548,7 +555,7 @@ export class App {
       const v = (label.textContent ?? "").replace(/\s+/g, " ").trim();
       if (save && v && v !== doc.sheetName) {
         if (doc.book.sheets.some((s) => s !== doc && s.sheetName.toLowerCase() === v.toLowerCase())) toast(`There's already a sheet called "${v}"`);
-        else { doc.sheetName = v; doc.book.structureDirty = true; }
+        else { doc.book.renameSheet(doc, v); this.grid.invalidate(); }
       }
       this.render();
       this.grid.focus();
@@ -892,8 +899,27 @@ export class App {
       : `${name(s.r0, s.c0)}:${name(s.r1, s.c1)}`;
     if (document.activeElement !== nameBox) nameBox.value = label;
     if (!this.grid.editing && document.activeElement !== this.cellInput) this.cellInput.value = this.activeRaw();
+    // Part of a spill: show the formula it comes from, greyed out.
+    const dr = d.dataRow(d.sel.ar);
+    const sp = d.raw(dr, d.sel.ac) === "" ? d.engine.spillAnchor(dr, d.sel.ac) : null;
+    this.cellInput.placeholder = sp ? d.raw(sp.r, sp.c) : "";
+    if (document.activeElement !== nameBox) { const n = this.nameFor(s); if (n) nameBox.value = n; }
     this.renderStats();
     this.refreshToolbar();
+  }
+
+  /** A defined name that covers exactly this selection, if any. */
+  private nameFor(s: { r0: number; c0: number; r1: number; c1: number }): string | null {
+    const d = this.active!;
+    if (!d.book.names.size || d.view) return null;
+    for (const { name, ref } of d.book.names.values()) {
+      const refs = Engine.references("=" + ref);
+      if (refs.length !== 1) continue;
+      const x = refs[0];
+      if ((x.sheet ?? d.sheetName).toLowerCase() !== d.sheetName.toLowerCase()) continue;
+      if (x.r1 === s.r0 && x.r2 === s.r1 && x.c1 === s.c0 && x.c2 === s.c1) return name;
+    }
+    return null;
   }
 
   private activeRaw(): string {
@@ -1011,8 +1037,7 @@ export class App {
         if (!this.active) return;
         const r = b.getBoundingClientRect();
         b.classList.add("open");
-        showMenu(["SUM", "AVERAGE", "COUNT", "MIN", "MAX"].map((fn) => ({ label: fn[0] + fn.slice(1).toLowerCase(), key: fn, action: () => this.autoSum(fn) })),
-          r.left, r.bottom + 4, () => b.classList.remove("open"));
+        showMenu(this.functionMenu(), r.left, r.bottom + 4, () => b.classList.remove("open"));
       } })),
       grow(),
       t("find", toolButton({ icon: "search", title: "Find and replace (Ctrl+F)", onClick: withDoc(() => (this.find.isOpen ? this.find.close() : this.find.open(false))) })),
@@ -1277,6 +1302,7 @@ export class App {
       ["Editing", [
         ["Edit cell", "F2 / Enter"], ["New line in a cell", "Alt+Enter"], ["Confirm and move", "Enter / Tab"],
         ["Cancel editing", "Esc"], ["Clear cells", "Delete"], ["Fill down", "Ctrl+D"],
+        ["Cycle $ in a reference", "F4"], ["Accept a function suggestion", "Tab"],
         ["Undo", "Ctrl+Z"], ["Redo", "Ctrl+Y"],
       ]],
       ["Clipboard", [
@@ -1429,9 +1455,114 @@ export class App {
         { label: "Everything", action: () => { this.grid.clear(); this.applyFormat(() => ({}), "Clear formatting"); } },
       ] },
       "sep",
+      { label: "Formula", children: this.formulaItems() },
       ...extras,
       { label: "Fill down", key: "Ctrl+D", action: () => this.grid.fillDown() },
     ], x, y);
+  }
+
+  /* ------------------------------- formulas ------------------------------- */
+
+  /** The Σ menu: quick totals, then every function by category, then the tools. */
+  private functionMenu(): MenuItem[] {
+    const cats = ["Math", "Statistics", "Logic", "Lookup", "Text", "Date", "Finance", "Array", "Info", "Lambda"] as const;
+    const label: Record<string, string> = { Math: "Maths", Statistics: "Statistics", Logic: "Logic", Lookup: "Lookup", Text: "Text", Date: "Date & time", Finance: "Finance", Array: "Arrays", Info: "Information", Lambda: "LET & LAMBDA" };
+    const seen = new Set<string>();
+    const byCat = (cat: string): MenuItem[] => Object.keys(FUNCS).sort()
+      .filter((n) => FUNCS[n].cat === cat && !seen.has(FUNCS[n].sig))
+      .map((n) => { seen.add(FUNCS[n].sig); return { label: n, action: () => this.insertFunction(n) } as MenuItem; });
+    return [
+      ...["SUM", "AVERAGE", "COUNT", "MIN", "MAX"].map((fn) => ({ label: fn[0] + fn.slice(1).toLowerCase(), key: fn, action: () => this.autoSum(fn) }) as MenuItem),
+      "sep",
+      ...cats.map((c) => ({ label: label[c], children: byCat(c) }) as MenuItem),
+      "sep",
+      ...this.formulaItems(),
+    ];
+  }
+
+  private formulaItems(): MenuItem[] {
+    const d = this.active!;
+    const isFormula = d.raw(d.dataRow(d.sel.ar), d.sel.ac).startsWith("=");
+    return [
+      { label: "Evaluate formula…", disabled: !isFormula, action: () => this.evaluateFormula() },
+      { label: "Trace precedents", disabled: !isFormula, action: () => this.trace("precedents") },
+      { label: "Trace dependents", action: () => this.trace("dependents") },
+      { label: "Remove arrows", disabled: !this.grid.hasTraces, action: () => this.grid.setTraces([]) },
+      "sep",
+      { label: "Name this range…", action: () => this.nameSelection() },
+      { label: "Named ranges…", action: () => this.openNames() },
+    ];
+  }
+
+  /** Start (or add to) a formula with a function. */
+  private insertFunction(name: string) {
+    const d = this.active;
+    if (!d) return;
+    const f = document.activeElement === this.cellInput ? this.cellInput : this.grid.editing ? this.grid.editor : null;
+    if (f && f.value.startsWith("=")) {
+      const a = f.selectionStart ?? f.value.length, b = f.selectionEnd ?? a;
+      f.value = f.value.slice(0, a) + name + "(" + f.value.slice(b);
+      f.focus();
+      f.setSelectionRange(a + name.length + 1, a + name.length + 1);
+      f.dispatchEvent(new Event("input", { bubbles: true }));
+      return;
+    }
+    this.grid.startEdit("replace", `=${name}(`);
+    this.grid.editor.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  private evaluateFormula() {
+    const d = this.active;
+    if (!d) return;
+    if (this.grid.editing) this.grid.commitEdit();
+    evaluateDialog(d, d.dataRow(d.sel.ar), d.sel.ac, () => this.grid.focus());
+  }
+
+  /** Arrows from the cells a formula reads, or to the formulas that read this cell. */
+  private trace(kind: "precedents" | "dependents") {
+    const d = this.active;
+    if (!d) return;
+    if (d.view) { toast("Clear filters and show hidden rows to trace cells"); return; }
+    const r = d.dataRow(d.sel.ar), c = d.sel.ac;
+    const here = { r, c };
+    const elsewhere: string[] = [];
+    const list: { from: { r1: number; c1: number; r2: number; c2: number }; to: { r: number; c: number } }[] = [];
+    if (kind === "precedents") {
+      for (const ref of Engine.references(d.raw(r, c))) {
+        if (ref.sheet && ref.sheet.toLowerCase() !== d.sheetName.toLowerCase()) { elsewhere.push(`${ref.sheet}`); continue; }
+        list.push({ from: ref, to: here });
+      }
+      if (!list.length && !elsewhere.length) { toast("This formula doesn't read any cells"); return; }
+    } else {
+      for (const [fr, fc] of d.engine.dependentsOf(r, c)) list.push({ from: { r1: r, c1: c, r2: r, c2: c }, to: { r: fr, c: fc } });
+      for (const s of d.book.sheets) if (s !== d && s.engine.dependentsOf(r, c, d.sheetName).length) elsewhere.push(s.sheetName);
+      if (!list.length && !elsewhere.length) { toast("No formulas use this cell"); return; }
+    }
+    this.grid.setTraces(list);
+    if (elsewhere.length) toast(`${kind === "precedents" ? "Also reads cells on" : "Also used by formulas on"} ${[...new Set(elsewhere)].map((n) => `"${n}"`).join(", ")}`);
+  }
+
+  private selectionRef(): string {
+    const d = this.active!;
+    const s = selRect(d.sel);
+    const rect = { r0: d.dataRow(s.r0), c0: s.c0, r1: d.dataRow(s.r1), c1: s.c1 };
+    return absRef(d, rect, { cols: this.grid.isWholeCols(s), rows: this.grid.isWholeRows(s) });
+  }
+
+  private nameSelection() {
+    const d = this.active;
+    if (!d) return;
+    const box = $("cell-name") as HTMLInputElement;
+    box.focus();
+    box.value = "";
+    box.placeholder = "Type a name, then Enter";
+    setTimeout(() => (box.placeholder = ""), 4000);
+  }
+
+  private openNames() {
+    const d = this.active;
+    if (!d) return;
+    namesDialog(d, this.selectionRef(), () => { this.grid.invalidate(); this.onSelection(); }, (ref) => this.goTo(ref));
   }
 
   private selectionHasChecks(): boolean {
@@ -1935,7 +2066,7 @@ export class App {
    * Go To: jump to "B12", "A1:C9", "C" or "C:E" (columns), "12" or "3:8"
    * (rows), optionally prefixed by a sheet ("Totals!A1"), or just a sheet name.
    */
-  private goTo(text: string): boolean {
+  private goTo(text: string, depth = 0): boolean {
     let t = text.trim();
     let d = this.active;
     if (!d || !t) return false;
@@ -1950,6 +2081,9 @@ export class App {
       const target = findSheet(t);
       if (target && !/^[A-Za-z]{1,3}\d*$/.test(t)) { if (target !== d) this.showSheet(target); return true; }
     }
+    // Defined names win over things that merely look like columns (QTY).
+    if (d.book.names.has(t.toUpperCase()) && depth < 3) return this.goTo(d.book.names.get(t.toUpperCase())!.ref, depth + 1);
+    if (/^[A-Za-z]{3}$/.test(t)) return false; // "QTY": a name, not column QTY
     const up = t.toUpperCase().replace(/\$/g, "");
     const R = this.grid.fullRow(), C = this.grid.fullCol();
     const row = (n: string) => { const r = d!.displayRow(Number(n) - 1); return r; };
@@ -1980,8 +2114,22 @@ export class App {
       e.stopPropagation();
       if (e.key === "Enter") {
         e.preventDefault();
-        if (this.goTo(box.value)) { box.blur(); this.grid.focus(); this.onSelection(); }
-        else { toast(`Couldn't find "${box.value.trim()}"`); box.select(); }
+        const v = box.value.trim();
+        const d0 = this.active;
+        // A new name: valid, unused, not a sheet, and not a short column jump like "C" or "AB".
+        const isNewName = !!d0 && validName(v) && !d0.book.names.has(v.toUpperCase())
+          && !d0.book.sheets.some((x) => x.sheetName.toLowerCase() === v.toLowerCase()) && !/^[A-Za-z]{1,2}$/.test(v);
+        if (!isNewName && this.goTo(v)) { box.blur(); this.grid.focus(); this.onSelection(); }
+        else if (this.active && validName(v)) {
+          // Typing a new name with cells selected names them, as in Excel.
+          const d = this.active;
+          const p = nameProblem(d.book, v);
+          if (p) { toast(p, true); box.select(); return; }
+          defineName(d.book, v, this.selectionRef());
+          toast(`Named ${this.selectionRef()} "${v}" — use it in formulas, e.g. =SUM(${v})`);
+          box.blur(); this.grid.focus(); this.onSelection();
+        }
+        else { toast(`Couldn't find "${v}"`); box.select(); }
       } else if (e.key === "Escape") {
         e.preventDefault();
         box.blur();
@@ -1995,6 +2143,13 @@ export class App {
   private bindCellBar() {
     this.bindNameBox();
     const input = this.cellInput;
+    this.grid.setFormulaBar(input);
+    const assist = new FormulaAssist({
+      names: () => this.active ? [...this.active.book.names.values()].map((n) => n.name) : [],
+      anchor: (f) => f.getBoundingClientRect(),
+    });
+    assist.attach(this.grid.editor);
+    assist.attach(input);
     input.addEventListener("input", () => {
       if (!this.active) return;
       if (!this.grid.editing) this.grid.startEdit("edit", input.value, false);

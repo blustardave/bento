@@ -1,6 +1,6 @@
 import { fromTSV, toTSV } from "./csv";
 import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, allRects, selRect } from "./doc";
-import { offsetFormula } from "./formula";
+import { Engine, offsetFormula } from "./formula";
 import { fillValues } from "./fill";
 import { DEFAULT_FONT, DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
 import { clamp, colName, parseNum } from "./util";
@@ -51,6 +51,7 @@ type Drag =
   | { kind: "move"; src: Rect; grabR: number; grabC: number }
   | { kind: "freezeRows" }
   | { kind: "freezeCols" }
+  | { kind: "pointref" }
   | Reorder;
 
 /** Dragging whole selected columns/rows to a new place. */
@@ -80,6 +81,8 @@ function prefNumber(key: string, fallback: number): number {
   const v = Number(localStorage.getItem(key));
   return localStorage.getItem(key) !== null && Number.isFinite(v) ? v : fallback;
 }
+
+const REF_COLORS = ["#4f86c6", "#d97757", "#6c8c55", "#9b7bb8", "#c9922e", "#3d968d", "#c9617f"];
 
 export class Grid {
   doc: Doc | null = null;
@@ -689,7 +692,10 @@ export class Grid {
       else ctx.fillRect(rhw - bar, 0, bar, this.hh);
     }
     this.drawReorderGap();
+    this.drawSpillOutline();
     this.drawSelectionOverlay();
+    this.drawFormulaRefs();
+    this.drawTraces();
     this.drawFreezePreview();
     this.hooks.onRender?.();
   }
@@ -826,11 +832,12 @@ export class Grid {
     // 2. Text. Overflowing text hides the grid lines it crosses.
     const skipV = new Set<number>(); // no vertical line after (r, c)
     ctx.textBaseline = "middle";
-    const drawText = (r: number, c: number) => {
+    const drawText = (r: number, c: number, spilled = false) => {
       const dr = d.dataRow(r);
       const row = d.rows[dr];
-      if (!row) return;
-      const raw = row[c];
+      if (!row && !spilled) return;
+      // Spilled cells have no text of their own: show them like a formula result.
+      const raw = spilled ? "=" : row[c];
       if (!raw) return;
       const m = mergeOf(r, c);
       const box = boxOf(r, c, m);
@@ -913,6 +920,19 @@ export class Grid {
       for (let c = c0; c <= Math.min(c1, len - 1); c++) if (!covered.has(r * 65536 + c)) drawText(r, c);
     }
     for (const [r, c] of anchors) drawText(r, c);
+    // Values spilled from dynamic-array formulas (FILTER, SORT, SEQUENCE…).
+    for (const sp of d.engine.spillRects()) {
+      for (let i = 0; i < sp.h; i++) {
+        const dr = sp.r + i;
+        const r = d.view ? d.displayRow(dr) : dr;
+        if (r < r0 || r > r1) { if (!d.view && r > r1) break; continue; }
+        for (let j = 0; j < sp.w; j++) {
+          const c = sp.c + j;
+          if ((!i && !j) || c < c0 || c > c1 || covered.has(r * 65536 + c)) continue;
+          drawText(r, c, true);
+        }
+      }
+    }
 
     // 2b. Checkboxes, dropdown chips and images in cells.
     for (let r = r0; r <= r1; r++) {
@@ -1137,6 +1157,150 @@ export class Grid {
     const rect = this.wrap.getBoundingClientRect();
     this.hooks.onDropdown?.(ar, ac, rect.left + box.x, rect.top + box.y + box.h + 2);
     return true;
+  }
+
+  /* ------------------------- formulas: pointing ------------------------- */
+
+  /** The formula bar, so clicks can put references into it too. */
+  private bar: HTMLInputElement | null = null;
+  private pointRef: { field: HTMLInputElement | HTMLTextAreaElement; start: number; end: number; ar: number; ac: number } | null = null;
+  private pointing = false;
+
+  setFormulaBar(input: HTMLInputElement) {
+    this.bar = input;
+    input.addEventListener("input", () => { if (!this.pointing) this.pointRef = null; if (this.editing) this.invalidate(); });
+  }
+
+  private formulaField(): HTMLInputElement | HTMLTextAreaElement | null {
+    if (!this.editing) return null;
+    const f = document.activeElement === this.bar && this.bar ? this.bar : this.editor;
+    return f.value.startsWith("=") ? f : null;
+  }
+
+  /** Is the caret somewhere a reference could go (after "=", "(", ",", an operator…)? */
+  private expectsRef(f: HTMLInputElement | HTMLTextAreaElement): boolean {
+    const caret = f.selectionStart ?? f.value.length;
+    if (this.pointRef && this.pointRef.field === f && caret === this.pointRef.end) return true;
+    const before = f.value.slice(0, caret).replace(/\s+$/, "");
+    if ((before.match(/"/g) ?? []).length % 2) return false;
+    return /[=(,;+\-*/^&<>:{]$/.test(before);
+  }
+
+  /** Put (or update) a pointed-at reference in the formula being typed. */
+  private insertPointRef(f: HTMLInputElement | HTMLTextAreaElement, r1: number, c1: number, r2: number, c2: number, fresh: boolean) {
+    const d = this.doc!;
+    const a = colName(Math.min(c1, c2)) + (d.dataRow(Math.min(r1, r2)) + 1);
+    const b = colName(Math.max(c1, c2)) + (d.dataRow(Math.max(r1, r2)) + 1);
+    const ref = a === b ? a : `${a}:${b}`;
+    const caret = f.selectionStart ?? f.value.length;
+    const p = this.pointRef;
+    const replacing = p && p.field === f && (!fresh || caret === p.end);
+    const start = replacing ? p!.start : f.selectionStart ?? caret;
+    const end = replacing ? p!.end : f.selectionEnd ?? caret;
+    f.value = f.value.slice(0, start) + ref + f.value.slice(end);
+    const pos = start + ref.length;
+    f.focus();
+    f.setSelectionRange(pos, pos);
+    this.pointRef = { field: f, start, end: pos, ar: fresh ? r1 : p!.ar, ac: fresh ? c1 : p!.ac };
+    this.pointing = true;
+    f.dispatchEvent(new Event("input", { bubbles: true }));
+    this.pointing = false;
+    this.invalidate();
+  }
+
+  /** Coloured boxes round the references in the formula being typed. */
+  private drawFormulaRefs() {
+    const d = this.doc;
+    if (!d || !this.editing) return;
+    const text = document.activeElement === this.bar && this.bar ? this.bar.value : this.editor.value;
+    if (!text.startsWith("=")) return;
+    const { ctx } = this;
+    let i = 0;
+    for (const ref of Engine.references(text)) {
+      const color = REF_COLORS[i++ % REF_COLORS.length];
+      if (ref.sheet && ref.sheet.toLowerCase() !== d.sheetName.toLowerCase()) continue;
+      if (d.view) continue;
+      const r1 = ref.r1 < 0 ? 0 : ref.r1, r2 = ref.r2 < 0 ? d.displayRows() - 1 : Math.min(ref.r2, d.displayRows() - 1);
+      const c1 = ref.c1 < 0 ? 0 : ref.c1, c2 = ref.c2 < 0 ? d.displayCols() - 1 : Math.min(ref.c2, d.displayCols() - 1);
+      const x0 = this.colLeft(c1), y0 = this.rowTop(r1);
+      const x1 = this.colLeft(c2) + this.cw(c2), y1 = this.rowTop(r2) + this.rowH(r2);
+      if (x1 < 0 || y1 < 0 || x0 > this.w || y0 > this.h) continue;
+      ctx.save();
+      ctx.globalAlpha = 0.1;
+      ctx.fillStyle = color;
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(Math.round(x0) + 0.75, Math.round(y0) + 0.75, Math.round(x1 - x0) - 1.5, Math.round(y1 - y0) - 1.5);
+      ctx.restore();
+    }
+  }
+
+  /* ---------------------------- trace arrows ---------------------------- */
+
+  private traces: { from: { r1: number; c1: number; r2: number; c2: number }; to: { r: number; c: number } }[] = [];
+  private traceFor = -1;
+
+  /** Arrows from cells to the formulas that use them (data coordinates). */
+  setTraces(list: { from: { r1: number; c1: number; r2: number; c2: number }; to: { r: number; c: number } }[]) {
+    this.traces = list;
+    this.traceFor = this.doc?.version ?? -1;
+    this.invalidate();
+  }
+
+  get hasTraces() { return this.traces.length > 0; }
+
+  private drawTraces() {
+    const d = this.doc;
+    if (!d || !this.traces.length) return;
+    if (d.version !== this.traceFor || d.view) { this.traces = []; return; }
+    const { ctx } = this;
+    const blue = "#4f86c6";
+    const centre = (r: number, c: number) => ({ x: this.colLeft(c) + this.cw(c) / 2, y: this.rowTop(r) + this.rowH(r) / 2 });
+    ctx.save();
+    ctx.strokeStyle = blue;
+    ctx.fillStyle = blue;
+    ctx.lineWidth = 1.5;
+    for (const t of this.traces) {
+      const f = t.from;
+      const r1 = Math.max(0, f.r1), r2 = f.r2 < 0 ? d.displayRows() - 1 : f.r2;
+      const c1 = Math.max(0, f.c1), c2 = f.c2 < 0 ? d.displayCols() - 1 : f.c2;
+      const range = r1 !== r2 || c1 !== c2;
+      if (range) {
+        const x0 = this.colLeft(c1), y0 = this.rowTop(r1);
+        const x1 = this.colLeft(c2) + this.cw(c2), y1 = this.rowTop(r2) + this.rowH(r2);
+        ctx.strokeRect(Math.round(x0) + 0.75, Math.round(y0) + 0.75, Math.round(x1 - x0) - 1.5, Math.round(y1 - y0) - 1.5);
+      }
+      const a = centre(r1, c1), b = centre(t.to.r, t.to.c);
+      ctx.beginPath(); ctx.arc(a.x, a.y, 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      const ang = Math.atan2(b.y - a.y, b.x - a.x), L = 8;
+      ctx.beginPath();
+      ctx.moveTo(b.x, b.y);
+      ctx.lineTo(b.x - L * Math.cos(ang - 0.4), b.y - L * Math.sin(ang - 0.4));
+      ctx.lineTo(b.x - L * Math.cos(ang + 0.4), b.y - L * Math.sin(ang + 0.4));
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /** A dashed outline round the spill the active cell is part of. */
+  private drawSpillOutline() {
+    const d = this.doc;
+    if (!d || this.editing) return;
+    const sp = d.engine.spillAnchor(d.dataRow(d.sel.ar), d.sel.ac);
+    if (!sp || d.view) return;
+    const { ctx, colors: k } = this;
+    const x0 = this.colLeft(sp.c), y0 = this.rowTop(sp.r);
+    const x1 = this.colLeft(sp.c + sp.w - 1) + this.cw(sp.c + sp.w - 1), y1 = this.rowTop(sp.r + sp.h - 1) + this.rowH(sp.r + sp.h - 1);
+    ctx.save();
+    ctx.strokeStyle = k.accent;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(Math.round(x0) + 0.5, Math.round(y0) + 0.5, Math.round(x1 - x0) - 1, Math.round(y1 - y0) - 1);
+    ctx.restore();
   }
 
   /* ----------------------- dragging columns / rows ----------------------- */
@@ -2287,6 +2451,17 @@ export class Grid {
       const { x, y } = this.local(e);
       if (x > sc.clientWidth || y > sc.clientHeight) return; // on a scrollbar
       e.preventDefault();
+      // Typing a formula: clicking a cell puts its reference in.
+      const ff = this.formulaField();
+      if (ff && e.button === 0 && this.zoneAt(x, y) === "cell" && this.expectsRef(ff)) {
+        let r = this.rowAt(y), c = this.colAt(x);
+        const m = this.mergeAt(r, c);
+        if (m) { r = m.r0; c = m.c0; }
+        this.insertPointRef(ff, r, c, r, c, true);
+        this.drag = { kind: "pointref" };
+        sc.setPointerCapture(e.pointerId);
+        return;
+      }
       if (this.editing) this.commitEdit();
       this.focus();
       if (e.button === 2) {
@@ -2367,6 +2542,11 @@ export class Grid {
         return;
       }
       if (drag?.kind === "reorder") { this.updateReorder(drag, x, y); return; }
+      if (drag?.kind === "pointref") {
+        const p = this.pointRef;
+        if (p) { const r = clamp(this.rowAt(y), 0, d.displayRows() - 1), c = clamp(this.colAt(x), 0, d.displayCols() - 1); this.insertPointRef(p.field, p.ar, p.ac, r, c, false); }
+        return;
+      }
       if (drag?.kind === "fill") { this.updateFillTarget(drag.src, x, y); this.invalidate(); return; }
       if (drag?.kind === "move") { this.updateMoveTarget(drag, x, y); this.invalidate(); return; }
       if (drag?.kind === "freezeRows" || drag?.kind === "freezeCols") {
@@ -2488,9 +2668,11 @@ export class Grid {
 
     this.editor.addEventListener("keydown", (e) => this.onEditorKey(e));
     this.editor.addEventListener("input", (e) => {
+      if (!this.pointing) this.pointRef = null;
       this.autocomplete(e as InputEvent);
       this.placeEditor();
       this.hooks.onEditText(this.editor.value);
+      if (this.editor.value.startsWith("=")) this.invalidate();
     });
     this.editor.addEventListener("blur", () => {
       // Clicking elsewhere in the app commits, like a spreadsheet.

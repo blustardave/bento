@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "esbuild tests/core.test.ts --bundle --platform=node --outfile=node_modules/.cache/core.test.cjs --log-level=warning && node --max-old-space-size=4096 node_modules/.cache/core.test.cjs"
+    "test": "esbuild tests/core.test.ts --bundle --platform=node --outfile=node_modules/.cache/core.test.cjs --log-level=warning && node --max-old-space-size=4096 node_modules/.cache/core.test.cjs && esbuild tests/formula.test.ts --bundle --platform=node --outfile=node_modules/.cache/formula.test.cjs --log-level=warning && node node_modules/.cache/formula.test.cjs"
   },
   "dependencies": {
     "@fontsource/source-serif-4": "^5.3.1",

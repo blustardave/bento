@@ -50,6 +50,8 @@ interface BentoFileV2 {
   sheets: SheetData[];
   active?: number;
   csv?: CsvSettings;
+  /** Defined names (file-wide). */
+  names?: { name: string; ref: string }[];
 }
 
 export function isBentoPath(p: string | null | undefined): boolean {
@@ -160,6 +162,7 @@ export async function encodeBento(book: Book): Promise<Uint8Array> {
     version: BENTO_VERSION,
     sheets: book.sheets.map(sheetToData),
     active: book.current,
+    names: book.names.size ? [...book.names.values()] : undefined,
   };
   return gzip(JSON.stringify(file));
 }
@@ -186,4 +189,6 @@ export async function decodeBento(bytes: Uint8Array, book: Book, makeSheet: (nam
     sheetFromData(doc, { ...data, name: data.name ?? `Sheet${i + 1}` });
   });
   book.current = Math.min(Math.max(0, raw.active ?? 0), book.sheets.length - 1);
+  book.names = new Map((raw.names ?? []).map((n) => [n.name.toUpperCase(), { name: n.name, ref: n.ref }]));
+  book.recalcAll();
 }

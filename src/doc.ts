@@ -1,6 +1,6 @@
 import { Delimiter, LineEnding, serialize } from "./csv";
 import { Encoding } from "./encoding";
-import { Engine, remapFormula, shiftFormula } from "./formula";
+import { Engine, remapFormula, renameSheetInFormula, shiftFormula } from "./formula";
 import { Style, isEmptyStyle, styleKey } from "./format";
 import { parseNum } from "./util";
 
@@ -36,7 +36,7 @@ interface Op {
   selAfter?: Sel;
 }
 
-interface CellChange { r: number; c: number; before: string; after: string }
+interface CellChange { r: number; c: number; before: string; after: string; doc?: Doc }
 
 /** A cell edit: a new value, a new style id, or both. */
 export interface CellSet { r: number; c: number; v?: string; style?: number }
@@ -167,7 +167,24 @@ export class Doc {
   constructor(name: string, path: string | null, book?: Book) {
     this.book = book ?? new Book(name, path);
     if (!book) this.book.sheets.push(this);
-    this.engine = new Engine({ raw: (r, c) => this.raw(r, c), rowCount: () => this.rows.length });
+    this.engine = new Engine({
+      raw: (r, c) => this.raw(r, c),
+      rowCount: () => this.rows.length,
+      colCount: () => Math.max(1, this.cols),
+      sheetName: () => this.sheetName,
+      sheet: (name) => this.book.sheets.find((s) => s.sheetName.toLowerCase() === name.toLowerCase())?.engine ?? null,
+      definedName: (name) => this.book.names.get(name.toUpperCase())?.ref,
+      formulas: () => this.formulaCells(),
+    });
+  }
+
+  /** Every formula cell (data coordinates). */
+  *formulaCells(): Iterable<[number, number]> {
+    const rows = this.rows;
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r];
+      for (let c = 0; c < row.length; c++) if (row[c].charCodeAt(0) === 61) yield [r, c];
+    }
   }
 
   /* ----------------------------- reading ----------------------------- */
@@ -255,9 +272,12 @@ export class Doc {
     while (row.length < c) row.push("");
     row[c] = v;
     if (v !== "" && c >= this.cols) this.cols = c + 1;
+    this.engine.noteCell(r, c, v);
   }
 
   private changed() {
+    // Formulas on other sheets may read this one.
+    for (const s of this.book.sheets) if (s !== this) s.engine.invalidate();
     this.engine.invalidate();
     this.version++;
   }
@@ -269,17 +289,20 @@ export class Doc {
     const mBefore = this.merges.map((m) => ({ ...m }));
     const gBefore = [this.gridRows, this.gridCols];
     const oBefore = cloneObjects(this.objects);
+    const nBefore = new Map(this.book.names);
+    let nAfter = nBefore;
     let mAfter: Rect[] = [];
     let gAfter = gBefore;
     let oAfter: SheetObject[] = [];
     const run = op.run, undo = op.undo;
     op.run = () => { run(); };
-    op.undo = () => { undo(); this.merges = mBefore.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gBefore; this.objects = cloneObjects(oBefore); };
+    op.undo = () => { undo(); this.merges = mBefore.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gBefore; this.objects = cloneObjects(oBefore); this.book.names = new Map(nBefore); };
     op.run();
     mAfter = this.merges.map((m) => ({ ...m }));
     gAfter = [this.gridRows, this.gridCols];
     oAfter = cloneObjects(this.objects);
-    op.run = () => { run(); this.merges = mAfter.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gAfter; this.objects = cloneObjects(oAfter); };
+    nAfter = new Map(this.book.names);
+    op.run = () => { run(); this.merges = mAfter.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gAfter; this.objects = cloneObjects(oAfter); this.book.names = new Map(nAfter); };
     this.undoStack.push(op);
     if (this.undoStack.length > MAX_UNDO) {
       const dropped = this.undoStack.shift();
@@ -602,18 +625,42 @@ export class Doc {
   /** Rewrite formulas after a structural change; returns what changed. */
   private shiftFormulas(axis: "row" | "col", at: number, delta: number): CellChange[] {
     this.shiftObjects(axis, at, delta);
+    this.engine.structureChanged();
     const out: CellChange[] = [];
     const rows = this.rows;
+    const local = { local: true, sheet: this.sheetName };
     for (let r = 0; r < rows.length; r++) {
       const row = rows[r];
       for (let c = 0; c < row.length; c++) {
         const v = row[c];
         if (v.charCodeAt(0) !== 61) continue;
-        const nv = shiftFormula(v, axis, at, delta);
+        const nv = shiftFormula(v, axis, at, delta, local);
         if (nv !== v) { out.push({ r, c, before: v, after: nv }); row[c] = nv; }
       }
     }
+    // References from other sheets (Sheet1!B4) and defined names follow too.
+    this.forOtherFormulas((doc, r, c, v) => {
+      const nv = shiftFormula(v, axis, at, delta, { local: false, sheet: this.sheetName });
+      if (nv !== v) { out.push({ r, c, before: v, after: nv, doc }); doc.rows[r][c] = nv; }
+    });
+    this.book.rewriteNames((ref) => shiftFormula("=" + ref, axis, at, delta, { local: false, sheet: this.sheetName }).slice(1));
     return out;
+  }
+
+  /** Visit formulas on the other sheets that mention a sheet name. */
+  private forOtherFormulas(f: (doc: Doc, r: number, c: number, v: string) => void) {
+    for (const doc of this.book.sheets) {
+      if (doc === this) continue;
+      let touched = false;
+      for (let r = 0; r < doc.rows.length; r++) {
+        const row = doc.rows[r];
+        for (let c = 0; c < row.length; c++) {
+          const v = row[c];
+          if (v.charCodeAt(0) === 61 && v.includes("!")) { const before = row[c]; f(doc, r, c, v); if (row[c] !== before) touched = true; }
+        }
+      }
+      if (touched) { doc.engine.structureChanged(); doc.version++; }
+    }
   }
 
   /* --------------------------- moving rows / columns --------------------------- */
@@ -665,10 +712,14 @@ export class Doc {
       const block = this.rows.splice(from, n);
       this.rows.splice(to, 0, ...block);
     }
+    const local = { local: true, sheet: this.sheetName };
     for (const row of this.rows) for (let c = 0; c < row.length; c++) {
       const v = row[c];
-      if (v.charCodeAt(0) === 61) row[c] = remapFormula(v, axis, map);
+      if (v.charCodeAt(0) === 61) row[c] = remapFormula(v, axis, map, local);
     }
+    this.forOtherFormulas((doc, r, c, v) => { doc.rows[r][c] = remapFormula(v, axis, map, { local: false, sheet: this.sheetName }); });
+    this.book.rewriteNames((ref) => remapFormula("=" + ref, axis, map, { local: false, sheet: this.sheetName }).slice(1));
+    this.engine.structureChanged();
     for (const o of this.objects) {
       if (axis === "col") o.c = map(o.c); else o.r = map(o.r);
       if (o.kind === "chart") o.range = remapFormula("=" + o.range, axis, map).slice(1);
@@ -708,8 +759,10 @@ export class Doc {
   private restore(changes: CellChange[]) {
     for (let i = changes.length - 1; i >= 0; i--) {
       const ch = changes[i];
-      this.rows[ch.r][ch.c] = ch.before;
+      (ch.doc ?? this).rows[ch.r][ch.c] = ch.before;
+      if (ch.doc) { ch.doc.engine.structureChanged(); ch.doc.version++; }
     }
+    this.engine.structureChanged();
   }
 
   insertRows(at: number, n: number) {
@@ -886,6 +939,7 @@ export class Doc {
           return coll.compare(a.s, b.s) * dir;
         });
         this.rows = [...this.rows.slice(0, start), ...keys.map((k) => k.row)];
+        this.engine.structureChanged();
         // Single-row merges travel with their rows.
         if (this.merges.length) {
           const pos = new Map<string[], number>();
@@ -898,7 +952,7 @@ export class Doc {
         }
         this.refreshView();
       },
-      undo: () => { this.rows = before; },
+      undo: () => { this.rows = before; this.engine.structureChanged(); },
     });
     return true;
   }
@@ -982,6 +1036,7 @@ export class Doc {
     this.undoStack = [];
     this.redoStack = [];
     this.savedAt = null;
+    this.engine.structureChanged();
     this.changed();
   }
 }
@@ -1014,6 +1069,39 @@ export class Book {
   current = 0;
   /** Sheets added, removed, renamed or reordered since the last save. */
   structureDirty = false;
+  /** Defined names, by upper-case name: e.g. SALES → Sheet1!$B$2:$B$40. */
+  names = new Map<string, { name: string; ref: string }>();
+
+  /** Rewrite every defined name's reference. */
+  rewriteNames(f: (ref: string) => string) {
+    for (const [k, v] of this.names) {
+      const next = f(v.ref);
+      if (next !== v.ref) { this.names.set(k, { ...v, ref: next }); this.structureDirty = true; }
+    }
+  }
+
+  /** Rename a sheet, updating references to it everywhere. */
+  renameSheet(doc: Doc, name: string) {
+    const old = doc.sheetName;
+    if (old === name) return;
+    for (const s of this.sheets) {
+      let touched = false;
+      for (const row of s.rows) for (let c = 0; c < row.length; c++) {
+        const v = row[c];
+        if (v.charCodeAt(0) === 61 && v.includes("!")) { const nv = renameSheetInFormula(v, old, name); if (nv !== v) { row[c] = nv; touched = true; } }
+      }
+      if (touched) { s.engine.structureChanged(); s.version++; }
+    }
+    this.rewriteNames((ref) => renameSheetInFormula("=" + ref, old, name).slice(1));
+    doc.sheetName = name;
+    for (const s of this.sheets) s.engine.invalidate();
+    this.structureDirty = true;
+  }
+
+  /** After a sheet is added or removed, formulas pointing at it change. */
+  recalcAll() {
+    for (const s of this.sheets) { s.engine.invalidate(); s.version++; }
+  }
 
   constructor(name: string, path: string | null) {
     this.name = name;
