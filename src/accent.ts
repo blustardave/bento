@@ -29,7 +29,8 @@ const rgba = (c: [number, number, number], a: number) => `rgba(${c[0]}, ${c[1]},
 
 export function applyAccent(id: string, mode: Mode) {
   const root = document.documentElement.style;
-  const a = ACCENTS.find((x) => x.id === id);
+  // "custom:#4f86c6" is a colour picked by hand.
+  const a = id.startsWith("custom:") && /^#[0-9a-f]{6}$/i.test(id.slice(7)) ? { id, label: "Custom", base: id.slice(7) } : ACCENTS.find((x) => x.id === id);
   if (!a || a.id === "clay") { for (const v of VARS) root.removeProperty(v); return; }
   const base = rgb(a.base);
   const white: [number, number, number] = [255, 255, 255], black: [number, number, number] = [0, 0, 0];

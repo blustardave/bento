@@ -9,15 +9,16 @@
 }
 
 [data-theme="light"] {
-  --bg: #faf9f5;
-  --surface: #f2f0e8;
-  --surface-2: #e9e6dc;
+  /* Near-white with just a breath of warmth, like paper rather than cream. */
+  --bg: #fdfdfc;
+  --surface: #f4f4f2;
+  --surface-2: #eaeae7;
   --raised: #ffffff;
-  --line: #e9e7de;
-  --line-strong: #d8d5ca;
+  --line: #e3e3e0;
+  --line-strong: #d0d0cc;
   --text: #1f1e1d;
-  --text-2: #5e5d58;
-  --muted: #85837b;
+  --text-2: #5c5b57;
+  --muted: #84837e;
   --accent: #d97757;
   --accent-text: #b4553a;
   --accent-soft: rgba(217, 119, 87, 0.1);
@@ -25,7 +26,7 @@
   --sel-fill: rgba(217, 119, 87, 0.065);
   --sel-head: rgba(217, 119, 87, 0.15);
   --sel-head-strong: rgba(217, 119, 87, 0.32);
-  --on-accent: #faf9f5;
+  --on-accent: #fdfdfc;
   --error: #c4453a;
   --match: rgba(230, 180, 60, 0.28);
   --shadow: 0 1px 2px rgba(31, 30, 29, 0.06), 0 8px 24px rgba(31, 30, 29, 0.1);
@@ -812,7 +813,7 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
   padding: 0 14px;
   margin-top: -1px; /* cover the bar's top border */
   border-radius: 0;
-  font-size: 13px; line-height: 1;
+  font-size: 14px; line-height: 1;
   color: var(--text-2);
   max-width: 200px;
   transition: background var(--ease), color var(--ease);
@@ -1200,3 +1201,7 @@ input.switch:focus-visible { outline: 2px solid var(--accent-soft); outline-offs
 .names-row .icon-btn svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .names-empty { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
 #cell-input::placeholder { color: var(--muted); opacity: .7; }
+.accents { grid-template-columns: repeat(5, 22px); }
+.accent-swatch.custom:not(.on) { background: conic-gradient(from 90deg, #d97757, #c9922e, #6c8c55, #3d968d, #4f86c6, #8c68b0, #c9617f, #d97757); }
+.accent-picker { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+.accent-wrap { position: relative; }

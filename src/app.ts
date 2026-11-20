@@ -1204,7 +1204,20 @@ export class App {
       });
       accent.append(b);
     }
-    const accentName = el("span", { class: "accent-name", text: ACCENTS.find((a) => a.id === curAccent)?.label ?? "Clay" });
+    // Any colour at all, via the system colour picker.
+    const custom = el("button", { class: "accent-swatch custom" + (curAccent.startsWith("custom:") ? " on" : ""), title: "Custom colour…", "aria-label": "Custom colour" });
+    if (curAccent.startsWith("custom:")) custom.style.setProperty("--sw", curAccent.slice(7));
+    const picker = el("input", { type: "color", class: "accent-picker", value: curAccent.startsWith("custom:") ? curAccent.slice(7) : "#4f86c6" }) as HTMLInputElement;
+    picker.addEventListener("input", () => {
+      localStorage.setItem("bento.accent", `custom:${picker.value}`);
+      custom.style.setProperty("--sw", picker.value);
+      accent.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === custom));
+      accentName.textContent = "Custom";
+      this.applyTheme();
+    });
+    custom.addEventListener("click", () => picker.click());
+    accent.append(custom, picker);
+    const accentName = el("span", { class: "accent-name", text: curAccent.startsWith("custom:") ? "Custom" : ACCENTS.find((a) => a.id === curAccent)?.label ?? "Clay" });
     const grid = el("input", { type: "range", min: "0", max: "100", step: "5", class: "slider", value: String(Math.round(this.grid.gridAlpha * 100)) }) as HTMLInputElement;
     const gridVal = el("span", { class: "slider-val", text: `${grid.value}%` });
     const paintSlider = () => grid.style.setProperty("--fill", `${grid.value}%`);
@@ -1671,7 +1684,7 @@ export class App {
     void z;
     const isCol = axis === "col";
     const n = isCol ? s.c1 - s.c0 + 1 : s.r1 - s.r0 + 1;
-    const current = isCol ? d.width(s.c0) : (d.rowHeight(d.dataRow(s.r0)) || 26);
+    const current = isCol ? d.width(s.c0) : (d.rowHeight(d.dataRow(s.r0)) || 22);
     const title = isCol
       ? (n === 1 ? `Resize column ${colName(s.c0)}` : `Resize columns ${colName(s.c0)}–${colName(s.c1)}`)
       : (n === 1 ? `Resize row ${formatInt(d.dataRow(s.r0) + 1)}` : `Resize rows ${formatInt(d.dataRow(s.r0) + 1)}–${formatInt(d.dataRow(s.r1) + 1)}`);

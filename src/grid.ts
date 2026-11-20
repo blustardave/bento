@@ -5,10 +5,10 @@ import { fillValues } from "./fill";
 import { DEFAULT_FONT, DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
 import { clamp, colName, parseNum } from "./util";
 
-const BASE_ROW_H = 26;
-const BASE_HEAD_H = 28;
+const BASE_ROW_H = 22;
+const BASE_HEAD_H = 24;
 const MAX_PX = 15_000_000; // browsers cap element height; beyond this we scale the scrollbar
-const BASE_PAD = 8;
+const BASE_PAD = 5;
 const FONT_STACK = '"Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif';
 const BASE_FONT = `13px ${FONT_STACK}`;
 const BASE_FONT_BOLD = `600 13px ${FONT_STACK}`;
@@ -73,7 +73,7 @@ interface Reorder {
 interface Editing { r: number; c: number; mode: "replace" | "edit" }
 
 /** Internal clipboard: lets formulas survive copy/paste inside Bento. */
-let lastCopy: { tsv: string; raw: string[][]; values: string[][]; styles: Style[][]; rows: number[]; c: number } | null = null;
+let lastCopy: { tsv: string; raw: string[][]; values: string[][]; styles: Style[][]; rows: number[]; c: number; widths?: number[]; heights?: (number | undefined)[] } | null = null;
 
 export type PasteMode = "normal" | "values" | "format" | "plain" | "transpose";
 
@@ -613,7 +613,7 @@ export class Grid {
         ctx.font = this.cellFont(s, r === 0 && d.freezeHeader, 1);
         lines = this.wrapLines(this.cellText(r, c, raw, s, d).text, d.width(c) - BASE_PAD * 2).length;
       } else if (!raw && !s.size) continue;
-      max = Math.max(max, lines * lh + 8);
+      max = Math.max(max, lines * lh + 4);
     }
     return max > BASE_ROW_H ? max : 0;
   }
@@ -902,9 +902,11 @@ export class Grid {
         ? (ha === "r" ? x + cw - pad - px / 2 : ha === "l" && s.ha ? x + pad + px / 2 : x + cw / 2)
         : ha === "r" ? x + cw - pad : ha === "c" ? x + cw / 2 : x + pad;
       const block = lines.length * lh;
-      let ty = va === "t" ? y + 4 * this.zoom + lh / 2
+      // Inset from the edge, but never more than fits: in a short row "top" stays above "bottom".
+      const vp = Math.max(0, Math.min(4 * this.zoom, (rh - block) / 2));
+      let ty = va === "t" ? y + vp + lh / 2
         : va === "m" ? y + (rh - block) / 2 + lh / 2
-        : y + rh - 4 * this.zoom - block + lh / 2;
+        : y + rh - vp - block + lh / 2;
       ty += 0.5;
       for (const line of lines) {
         ctx.fillText(line, tx, ty);
@@ -1012,7 +1014,7 @@ export class Grid {
   /** Where a cell's checkbox sits. */
   private checkBox(box: { x: number; y: number; w: number; h: number }, s: Style) {
     const z = this.zoom;
-    const size = Math.round(14 * z);
+    const size = Math.round(13 * z);
     const ha = s.ha ?? "c";
     const x = ha === "l" ? box.x + this.pad : ha === "r" ? box.x + box.w - this.pad - size : box.x + (box.w - size) / 2;
     const va = s.va ?? "m";
@@ -1062,7 +1064,7 @@ export class Grid {
     } else if (s.check) {
       const b = this.checkBox(box, s);
       const on = this.isChecked(dr, c);
-      const rad = 3 * z;
+      const rad = 2.5 * z;
       ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, rad);
       if (on) {
         ctx.fillStyle = k.accent;
@@ -1077,9 +1079,9 @@ export class Grid {
         ctx.lineTo(b.x + b.w * 0.75, b.y + b.h * 0.33);
         ctx.stroke();
       } else {
-        ctx.beginPath(); ctx.roundRect(b.x + 0.75, b.y + 0.75, b.w - 1.5, b.h - 1.5, rad);
-        ctx.strokeStyle = k.muted;
-        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.roundRect(b.x + 0.8, b.y + 0.8, b.w - 1.6, b.h - 1.6, rad);
+        ctx.strokeStyle = k.text2;
+        ctx.lineWidth = 1.6;
         ctx.stroke();
       }
     } else if (s.list) {
@@ -1301,6 +1303,17 @@ export class Grid {
     ctx.setLineDash([4, 3]);
     ctx.strokeRect(Math.round(x0) + 0.5, Math.round(y0) + 0.5, Math.round(x1 - x0) - 1, Math.round(y1 - y0) - 1);
     ctx.restore();
+  }
+
+  /** Set the pointer for what's under (x, y); returns the freeze handle there, if any. */
+  private hoverCursor(x: number, y: number) {
+    const rc = this.resizeColAt(x, y);
+    const fz = rc < 0 || y >= this.hh ? this.freezeHit(x, y) : null;
+    const onFill = this.nearFillHandle(x, y);
+    const onEdge = !onFill && !fz && rc < 0 && this.onSelectionEdge(x, y);
+    const grabbable = !onFill && !fz && rc < 0 && this.overSelectedHeader(x, y);
+    this.scroller.style.cursor = onFill ? "crosshair" : onEdge ? "move" : fz || grabbable ? "grab" : rc >= 0 ? "col-resize" : "default";
+    return fz;
   }
 
   /* ----------------------- dragging columns / rows ----------------------- */
@@ -1541,14 +1554,14 @@ export class Grid {
       const inSel = hits.length > 0;
       const whole = hits.some((r) => this.isWholeCols(r));
       if (inSel) {
-        ctx.fillStyle = whole ? k.selHeadStrong : k.selHead;
+        ctx.fillStyle = whole ? k.accent : k.selHead;
         ctx.fillRect(x, 0, cw, hh);
       } else if (c === this.hoverCol) {
         ctx.fillStyle = k.surface;
         ctx.fillRect(x, 0, cw, hh);
       }
       ctx.font = whole ? this.fontHeadBold : this.fontHead;
-      ctx.fillStyle = whole ? k.text : inSel ? k.accentText : k.muted;
+      ctx.fillStyle = whole ? "#fff" : inSel ? k.accentText : k.muted;
       ctx.fillText(colName(c), x + cw / 2, hh / 2 + 0.5);
       if (d.filters.has(c)) {
         ctx.fillStyle = k.accent;
@@ -1556,12 +1569,12 @@ export class Grid {
       } else if (c === this.hoverCol && cw > 44) {
         const cx = x + cw - 14;
         if (this.hoverChevron) {
-          ctx.fillStyle = k.surface2;
+          ctx.fillStyle = whole ? "rgba(255,255,255,0.22)" : k.surface2;
           ctx.beginPath();
           ctx.arc(cx, hh / 2, 9, 0, Math.PI * 2);
           ctx.fill();
         }
-        ctx.strokeStyle = k.text2;
+        ctx.strokeStyle = whole ? "#fff" : k.text2;
         ctx.lineWidth = 1.3;
         ctx.beginPath();
         ctx.moveTo(cx - 3.5, hh / 2 - 1.5);
@@ -1590,11 +1603,11 @@ export class Grid {
       const inSel = hits.length > 0;
       const whole = hits.some((x) => this.isWholeRows(x));
       if (inSel) {
-        ctx.fillStyle = whole ? k.selHeadStrong : k.selHead;
+        ctx.fillStyle = whole ? k.accent : k.selHead;
         ctx.fillRect(0, y, rhw - this.lw, rh);
       }
       ctx.font = whole ? this.fontHeadBold : this.fontHead;
-      ctx.fillStyle = whole ? k.text : inSel ? k.accentText : k.muted;
+      ctx.fillStyle = whole ? "#fff" : inSel ? k.accentText : k.muted;
       ctx.fillText(String(d.dataRow(r) + 1), rhw / 2, y + rh / 2 + 0.5);
       // Rows hidden just above this one: a small up/down marker on the boundary.
       if (d.hiddenRows.size && this.hiddenAbove(r).length) this.hiddenMarker(rhw - 9, y, "row");
@@ -2184,6 +2197,9 @@ export class Grid {
     }
     const tsv = toTSV(shown);
     lastCopy = { tsv, raw, values, styles, rows, c: s.c0 };
+    // Whole columns/rows bring their size along when pasted onto whole columns/rows.
+    if (this.isWholeCols(s) && !this.isWholeRows(s)) lastCopy.widths = Array.from({ length: s.c1 - s.c0 + 1 }, (_, j) => d.width(s.c0 + j));
+    if (this.isWholeRows(s) && !this.isWholeCols(s)) lastCopy.heights = rows.map((r) => d.manualHeight(r));
     if (cut) this.clear("Cut");
     return tsv;
   }
@@ -2235,6 +2251,17 @@ export class Grid {
     }
     const after: Sel = { ar: s.r0, ac: s.c0, fr: s.r0 + h - 1, fc: s.c0 + w - 1 };
     d.setCells(cells, mode === "normal" ? "Paste" : "Paste special", after);
+    if (internal && (mode === "normal" || mode === "format")) {
+      if (internal.widths && this.isWholeCols(s)) {
+        internal.widths.forEach((w, j) => d.widths.set(s.c0 + j, w));
+        d.remeasureAll();
+      }
+      if (internal.heights && this.isWholeRows(s)) {
+        const byH = new Map<number | null, number[]>();
+        internal.heights.forEach((hgt, i) => { const k = hgt ?? null; byH.set(k, [...(byH.get(k) ?? []), d.dataRow(s.r0 + i)]); });
+        for (const [hgt, rs] of byH) d.setRowHeights(rs, hgt, "Paste row heights");
+      }
+    }
     this.select(after, false);
     this.hooks.onChange();
   }
@@ -2557,11 +2584,7 @@ export class Grid {
       if (drag) { this.dragTo(x, y); return; }
       // Hover feedback
       const rc = this.resizeColAt(x, y);
-      const fz = rc < 0 || y >= this.hh ? this.freezeHit(x, y) : null;
-      const onFill = this.nearFillHandle(x, y);
-      const onEdge = !onFill && !fz && rc < 0 && this.onSelectionEdge(x, y);
-      const grabbable = !onFill && !fz && rc < 0 && this.overSelectedHeader(x, y);
-      sc.style.cursor = onFill ? "crosshair" : onEdge ? "move" : fz || grabbable ? "grab" : rc >= 0 ? "col-resize" : "default";
+      const fz = this.hoverCursor(x, y);
       if (fz !== this.hoverFreeze) { this.hoverFreeze = fz; this.invalidate(); }
       const hc = y < this.hh && x >= this.rowHeaderWidth() ? this.colAt(x) : -1;
       const chev = hc >= 0 && rc < 0 && x > this.colLeft(hc) + this.cw(hc) - 24 && this.cw(hc) > 44;
@@ -2574,6 +2597,12 @@ export class Grid {
 
     const end = (e: PointerEvent) => {
       const drag = this.drag;
+      // The cursor reflects the new selection straight away (e.g. the hand
+      // over a header that's just been selected), without waiting for a move.
+      if (drag && drag.kind !== "reorder" && drag.kind !== "move" && drag.kind !== "fill") {
+        const p = this.local(e);
+        requestAnimationFrame(() => { if (!this.drag) this.hoverCursor(p.x, p.y); });
+      }
       if (drag?.kind === "reorder") this.endReorder(drag, e.type === "pointerup");
       if (drag?.kind === "resize") { this.doc?.remeasureAll(); this.hooks.onChange(); }
       if (drag?.kind === "move") {
