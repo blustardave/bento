@@ -6,6 +6,7 @@ import {
 import { IconName, ToolButton, icon, toolButton } from "./toolbar";
 import { showMenu, showPopover } from "./ui";
 import { el } from "./util";
+import { isMac, keys } from "./platform";
 
 export interface FormatContext {
   /** Style of the active cell (and whether it's in the frozen header row). */
@@ -81,7 +82,7 @@ export class FormatBar {
       const cur = c.active()?.style.font ?? DEFAULT_FONT;
       b.classList.add("open");
       showMenu(FONTS.map((f) => ({
-        label: f === DEFAULT_FONT ? "Default (Segoe UI)" : f, font: f, checked: f === cur,
+        label: f === DEFAULT_FONT ? isMac ? "Default (San Francisco)" : "Default (Segoe UI)" : f, font: f, checked: f === cur,
         action: () => c.apply((s) => ({ ...s, font: f === DEFAULT_FONT ? undefined : f }), "Font"),
       })), r.left, r.bottom + 4, () => b.classList.remove("open"));
     } });
@@ -126,9 +127,9 @@ export class FormatBar {
       c.apply((s) => ({ ...s, [key]: on ? (key === "b" && a?.header ? false : undefined) : true }), label);
     };
     const text = [
-      t("b", toolButton({ icon: "bold", title: "Bold (Ctrl+B)", onClick: toggle("b", "Bold") })),
-      t("i", toolButton({ icon: "italic", title: "Italic (Ctrl+I)", onClick: toggle("i", "Italic") })),
-      t("s", toolButton({ icon: "strike", title: "Strikethrough (Alt+Shift+5)", onClick: toggle("s", "Strikethrough") })),
+      t("b", toolButton({ icon: "bold", title: keys("Bold (Ctrl+B)"), onClick: toggle("b", "Bold") })),
+      t("i", toolButton({ icon: "italic", title: keys("Italic (Ctrl+I)"), onClick: toggle("i", "Italic") })),
+      t("s", toolButton({ icon: "strike", title: keys("Strikethrough (Alt+Shift+5)"), onClick: toggle("s", "Strikethrough") })),
       t("color", toolButton({ icon: "textColor", title: "Text colour", onClick: (b) => this.palette(b, "color") })),
     ];
 
@@ -152,7 +153,7 @@ export class FormatBar {
         close = showPopover(b, row);
       } }));
     const align = [
-      picker<HAlign>("ha", "Horizontal align", ALIGN_ICONS, { l: "Left (Ctrl+Shift+L)", c: "Centre (Ctrl+Shift+E)", r: "Right (Ctrl+Shift+R)" },
+      picker<HAlign>("ha", "Horizontal align", ALIGN_ICONS, { l: keys("Left (Ctrl+Shift+L)"), c: keys("Centre (Ctrl+Shift+E)"), r: keys("Right (Ctrl+Shift+R)") },
         (s, v) => ({ ...s, ha: v }), (s) => s.ha ?? "l"),
       picker<VAlign>("va", "Vertical align", VALIGN_ICONS, { t: "Top", m: "Middle", b: "Bottom" },
         (s, v) => ({ ...s, va: v === "b" ? undefined : v }), (s) => s.va ?? "b"),

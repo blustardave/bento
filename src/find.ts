@@ -3,6 +3,7 @@ import { Grid } from "./grid";
 import { toast } from "./ui";
 import { el, formatInt } from "./util";
 import { icon } from "./toolbar";
+import { keys } from "./platform";
 
 const MAX_MATCHES = 100_000;
 
@@ -44,7 +45,7 @@ export class FindPanel {
     });
     const repOne = el("button", { class: "find-opt", text: "Replace" });
     const repAll = el("button", { class: "find-opt strong", text: "Replace all" });
-    const showRep = el("button", { class: "find-opt", text: "Replace…", title: "Show replace (Ctrl+H)" });
+    const showRep = el("button", { class: "find-opt", text: "Replace…", title: keys("Show replace (Ctrl+H)") });
     this.showRep = showRep;
     showRep.addEventListener("click", () => this.setReplace(this.repRow.hidden));
     this.repRow = el("div", { class: "row field-row" }, icon("redo", 15), this.rep, repOne, repAll);

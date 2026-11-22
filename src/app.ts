@@ -26,6 +26,7 @@ import { CHART_TYPES, chartData, dataRegion, parseRange, rangeText } from "./cha
 import type { ChartObject, ChartType, ShapeObject, ShapeType, SheetObject } from "./doc";
 import { appVersion, initUpdater } from "./updater";
 import { basename, cellName, clamp, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
+import { isMac, keys, localiseTitles, osName } from "./platform";
 
 type Theme = "system" | "light" | "dusk" | "dark";
 const $ = (id: string) => document.getElementById(id)!;
@@ -765,7 +766,7 @@ export class App {
     const box = $("tabs");
     box.textContent = "";
     for (const d of this.docs) {
-      const closeBtn = el("span", { class: "x", title: "Close (Ctrl+W)" },
+      const closeBtn = el("span", { class: "x", title: keys("Close (Ctrl+W)") },
         el("span", { class: "dot" }),
         svg('<path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>', 12, "close-glyph"),
       );
@@ -790,8 +791,8 @@ export class App {
     box.hidden = !show;
     if (!show) return;
     box.textContent = "";
-    const open = el("button", { class: "btn primary" }, "Open a file", el("kbd", { text: "Ctrl+O" }));
-    const blank = el("button", { class: "btn" }, "New sheet", el("kbd", { text: "Ctrl+N" }));
+    const open = el("button", { class: "btn primary" }, "Open a file", el("kbd", { text: keys("Ctrl+O") }));
+    const blank = el("button", { class: "btn" }, "New sheet", el("kbd", { text: keys("Ctrl+N") }));
     open.addEventListener("click", () => this.openDialog());
     blank.addEventListener("click", () => this.newDoc());
     const recent = this.recent();
@@ -994,7 +995,7 @@ export class App {
     const f = this.formatBar.build();
 
     // Zoom: pick a level or type your own (e.g. 135).
-    this.zoomInput = el("input", { class: "zoom-input", value: "100%", title: "Zoom (Ctrl+= / Ctrl+-)", spellcheck: "false" });
+    this.zoomInput = el("input", { class: "zoom-input", value: "100%", title: keys("Zoom (Ctrl+= / Ctrl+-)"), spellcheck: "false" });
     const zoomCaret = toolButton({ icon: "caret", title: "Zoom levels", onClick: () => openZoomMenu() });
     zoomCaret.el.classList.add("caret-btn");
     const zoomBox = el("div", { class: "combo" }, this.zoomInput, zoomCaret.el);
@@ -1020,8 +1021,8 @@ export class App {
     this.zoomInput.addEventListener("blur", () => this.refreshToolbar());
 
     bar.append(
-      t("undo", toolButton({ icon: "undo", title: "Undo (Ctrl+Z)", onClick: withDoc((d) => this.grid.applyUndo(d.undo())) })),
-      t("redo", toolButton({ icon: "redo", title: "Redo (Ctrl+Y)", onClick: withDoc((d) => this.grid.applyUndo(d.redo())) })),
+      t("undo", toolButton({ icon: "undo", title: keys("Undo (Ctrl+Z)"), onClick: withDoc((d) => this.grid.applyUndo(d.undo())) })),
+      t("redo", toolButton({ icon: "redo", title: keys("Redo (Ctrl+Y)"), onClick: withDoc((d) => this.grid.applyUndo(d.redo())) })),
       zoomBox,
       divider(), ...f.numbers,
       divider(), ...f.font,
@@ -1042,7 +1043,7 @@ export class App {
         showMenu(this.functionMenu(), r.left, r.bottom + 4, () => b.classList.remove("open"));
       } })),
       grow(),
-      t("find", toolButton({ icon: "search", title: "Find and replace (Ctrl+F)", onClick: withDoc(() => (this.find.isOpen ? this.find.close() : this.find.open(false))) })),
+      t("find", toolButton({ icon: "search", title: keys("Find and replace (Ctrl+F)"), onClick: withDoc(() => (this.find.isOpen ? this.find.close() : this.find.open(false))) })),
     );
     const z = Number(localStorage.getItem("bento.zoom"));
     if (z) this.grid.setZoom(z);
@@ -1139,24 +1140,24 @@ export class App {
     btn.classList.add("open");
     const recent = this.recent().filter((p) => !this.docs.some((x) => x.path === p)).slice(0, 5);
     const items: MenuItem[] = [
-      { label: "New sheet", key: "Ctrl+N", action: () => this.newDoc() },
-      { label: "Open…", key: "Ctrl+O", action: () => this.openDialog() },
+      { label: "New sheet", key: keys("Ctrl+N"), action: () => this.newDoc() },
+      { label: "Open…", key: keys("Ctrl+O"), action: () => this.openDialog() },
       ...(recent.length ? [{ heading: "Recent" } as MenuItem, ...recent.map((p) => ({ label: basename(p), action: () => this.open([{ name: basename(p), path: p }]) }))] : []),
       "sep",
-      { label: "Save", key: "Ctrl+S", disabled: !d, action: () => this.save() },
-      { label: "Save as…", key: "Ctrl+Shift+S", disabled: !d, action: () => this.save(d, true) },
-      { label: "Export as CSV…", key: "Ctrl+E", disabled: !d, action: () => this.exportCsv(d) },
+      { label: "Save", key: keys("Ctrl+S"), disabled: !d, action: () => this.save() },
+      { label: "Save as…", key: keys("Ctrl+Shift+S"), disabled: !d, action: () => this.save(d, true) },
+      { label: "Export as CSV…", key: keys("Ctrl+E"), disabled: !d, action: () => this.exportCsv(d) },
       ...(d?.source && !isBentoPath(d.source.name) ? [{ label: "Reopen CSV with other settings…", disabled: d.book.dirty, action: () => this.reopenCsv() } as MenuItem] : []),
-      { label: "Close tab", key: "Ctrl+W", disabled: !d, action: () => d && this.closeDoc(d) },
+      { label: "Close tab", key: keys("Ctrl+W"), disabled: !d, action: () => d && this.closeDoc(d) },
       "sep",
-      { label: "Find", key: "Ctrl+F", disabled: !d, action: () => this.find.open(false) },
-      { label: "Find and replace", key: "Ctrl+H", disabled: !d, action: () => this.find.open(true) },
+      { label: "Find", key: keys("Ctrl+F"), disabled: !d, action: () => this.find.open(false) },
+      { label: "Find and replace", key: keys("Ctrl+H"), disabled: !d, action: () => this.find.open(true) },
       "sep",
       { label: "Unfreeze rows and columns", disabled: !d || (!d.frozenRows && !d.frozenCols), action: () => { d!.setFrozen(0, 0); this.afterFreeze(); } },
       { label: "Clear all filters", disabled: !d?.filters.size, action: () => { d!.clearFilters(); this.afterStructure(); } },
       { label: "Unhide all columns", disabled: !d?.hidden.size, action: () => { d!.hidden.clear(); this.onChange(); } },
       "sep",
-      { label: "Preferences…", key: "Ctrl+,", action: () => this.preferences() },
+      { label: "Preferences…", key: keys("Ctrl+,"), action: () => this.preferences() },
       { label: "Keyboard shortcuts", key: "F1", action: () => this.shortcuts() },
       { label: "About Bento", action: async () => modal("Bento", `Version ${await appVersion()}\nA minimal, fast CSV editor.\nUpdates install automatically.\nAutoSave is ${autoSaveEnabled() ? "on" : "off"} (Preferences).`, [{ label: "Close", value: true, primary: true }]) },
     ];
@@ -1232,10 +1233,10 @@ export class App {
       this.grid.invalidate();
     });
     const appearance = el("div", { class: "psec" },
-      row("Theme", "Follow Windows, or pick one.", seg([["system", "System"], ["light", "Light"], ["dark", "Dark"]], this.theme(), (v) => this.setTheme(v as Theme))),
+      row("Theme", `Follow ${osName}, or pick one.`, seg([["system", "System"], ["light", "Light"], ["dark", "Dark"]], this.theme(), (v) => this.setTheme(v as Theme))),
       row("Accent colour", "Selections, highlights and buttons.", el("div", { class: "accent-wrap" }, accent, accentName)),
       row("Gridlines", "How strongly the lines between cells show. The header edges always stay.", el("div", { class: "slider-wrap" }, grid, gridVal)),
-      row("Toolbar", "Ctrl+Shift+F also shows and hides it.", sw(!document.getElementById("app")!.classList.contains("toolbar-hidden"), (v) => this.setToolbar(v))),
+      row("Toolbar", keys("Ctrl+Shift+F also shows and hides it."), sw(!document.getElementById("app")!.classList.contains("toolbar-hidden"), (v) => this.setToolbar(v))),
     );
 
     /* Editing */
@@ -1248,7 +1249,7 @@ export class App {
     const editing = el("div", { class: "psec" },
       row("After Enter, move", "Where the selection goes when you finish typing in a cell.", seg([["down", "Down"], ["right", "Right"]], this.grid.enterRight ? "right" : "down", (v) => { localStorage.setItem("bento.enterMoves", v); this.grid.enterRight = v === "right"; })),
       row("Autocomplete", "Suggest matching text from the same column. Enter or Tab accepts; keep typing to ignore.", sw(flag("bento.autocomplete"), (v) => localStorage.setItem("bento.autocomplete", v ? "on" : "off"))),
-      row("Currency", `Used by the $ button in the toolbar. Automatic follows your Windows region (${detected}).`, cur),
+      row("Currency", `Used by the $ button in the toolbar. Automatic follows your ${osName} region (${detected}).`, cur),
     );
 
     /* Saving */
@@ -1262,12 +1263,12 @@ export class App {
     appVersion().then((v) => (ver.textContent = v));
     const upd = el("button", { class: "btn", text: "Check now" });
     upd.addEventListener("click", () => { close(); $("check-btn").click(); });
-    const keys = el("button", { class: "btn", text: "Show" });
-    keys.addEventListener("click", () => { close(); this.shortcuts(); });
+    const keysBtn = el("button", { class: "btn", text: "Show" });
+    keysBtn.addEventListener("click", () => { close(); this.shortcuts(); });
     const about = el("div", { class: "psec" },
       row("Version", "Bento updates itself from GitHub.", ver),
       ...(isTauriApp ? [row("Updates", "Look for a newer version now.", upd)] : []),
-      row("Keyboard shortcuts", "Also on F1.", keys),
+      row("Keyboard shortcuts", "Also on F1.", keysBtn),
     );
 
     const sections: [string, string, HTMLElement][] = [
@@ -1315,32 +1316,32 @@ export class App {
     // "~" marks a mouse action (shown as text, not keys).
     const groups: [string, [string, string][]][] = [
       ["Editing", [
-        ["Edit cell", "F2 / Enter"], ["New line in a cell", "Alt+Enter"], ["Confirm and move", "Enter / Tab"],
-        ["Cancel editing", "Esc"], ["Clear cells", "Delete"], ["Fill down", "Ctrl+D"],
+        ["Edit cell", "F2 / Enter"], ["New line in a cell", keys("Alt+Enter")], ["Confirm and move", "Enter / Tab"],
+        ["Cancel editing", "Esc"], ["Clear cells", "Delete"], ["Fill down", keys("Ctrl+D")],
         ["Cycle $ in a reference", "F4"], ["Accept a function suggestion", "Tab"],
-        ["Undo", "Ctrl+Z"], ["Redo", "Ctrl+Y"],
+        ["Undo", keys("Ctrl+Z")], ["Redo", keys("Ctrl+Y")],
       ]],
       ["Clipboard", [
-        ["Copy", "Ctrl+C"], ["Cut", "Ctrl+X"], ["Paste", "Ctrl+V"], ["Paste values only", "Ctrl+Shift+V"],
-        ["Move cells", "~Drag the selection's edge"], ["Copy cells", "~Ctrl-drag the edge"],
+        ["Copy", keys("Ctrl+C")], ["Cut", keys("Ctrl+X")], ["Paste", keys("Ctrl+V")], ["Paste values only", keys("Ctrl+Shift+V")],
+        ["Move cells", "~Drag the selection's edge"], ["Copy cells", keys("~Ctrl-drag the edge")],
       ]],
       ["Moving around", [
-        ["Jump to edge of data", "Ctrl+Arrow"], ["Extend selection", "Shift+Arrow"], ["Select all", "Ctrl+A"],
-        ["Go to a cell or range", "Ctrl+G"], ["Add another range", "~Ctrl-click"],
+        ["Jump to edge of data", keys("Ctrl+Arrow")], ["Extend selection", "Shift+Arrow"], ["Select all", keys("Ctrl+A")],
+        ["Go to a cell or range", keys("Ctrl+G")], ["Add another range", keys("~Ctrl-click")],
       ]],
       ["Formatting", [
-        ["Bold", "Ctrl+B"], ["Italic", "Ctrl+I"], ["Underline", "Ctrl+U"], ["Strikethrough", "Alt+Shift+5"],
-        ["Align left", "Ctrl+Shift+L"], ["Align centre", "Ctrl+Shift+E"], ["Align right", "Ctrl+Shift+R"],
-        ["Clear formatting", "Ctrl+\\"],
+        ["Bold", keys("Ctrl+B")], ["Italic", keys("Ctrl+I")], ["Underline", keys("Ctrl+U")], ["Strikethrough", keys("Alt+Shift+5")],
+        ["Align left", keys("Ctrl+Shift+L")], ["Align centre", keys("Ctrl+Shift+E")], ["Align right", keys("Ctrl+Shift+R")],
+        ["Clear formatting", keys("Ctrl+\\")],
       ]],
       ["Rows, columns & sheets", [
-        ["Delete rows or columns", "Ctrl+Alt+−"], ["Next sheet", "Ctrl+PgDn"], ["Previous sheet", "Ctrl+PgUp"],
-        ["Tick checkboxes", "Space"], ["Open a dropdown", "Alt+↓"],
+        ["Delete rows or columns", keys("Ctrl+Alt+−")], ["Next sheet", keys("Ctrl+PgDn")], ["Previous sheet", keys("Ctrl+PgUp")],
+        ["Tick checkboxes", "Space"], ["Open a dropdown", keys("Alt+↓")],
       ]],
       ["Files & view", [
-        ["New", "Ctrl+N"], ["Open", "Ctrl+O"], ["Save", "Ctrl+S"], ["Save as", "Ctrl+Shift+S"], ["Export CSV", "Ctrl+E"],
-        ["Find", "Ctrl+F"], ["Find and replace", "Ctrl+H"], ["Next file", "Ctrl+Tab"], ["Close file", "Ctrl+W"],
-        ["Zoom", "~Ctrl + scroll"], ["Hide the toolbar", "Ctrl+Shift+F"], ["Preferences", "Ctrl+,"],
+        ["New", keys("Ctrl+N")], ["Open", keys("Ctrl+O")], ["Save", keys("Ctrl+S")], ["Save as", keys("Ctrl+Shift+S")], ["Export CSV", keys("Ctrl+E")],
+        ["Find", keys("Ctrl+F")], ["Find and replace", keys("Ctrl+H")], ["Next file", keys("Ctrl+Tab")], ["Close file", keys("Ctrl+W")],
+        ["Zoom", keys("~Ctrl + scroll")], ["Hide the toolbar", keys("Ctrl+Shift+F")], ["Preferences", keys("Ctrl+,")],
       ]],
     ];
     const keyEl = (combo: string) => {
@@ -1349,6 +1350,13 @@ export class App {
       combo.split(" / ").forEach((alt, i) => {
         if (i) span.append(el("span", { class: "or", text: "or" }));
         // "Ctrl+B / I / U" style: later parts are just keys.
+        if (isMac) {
+          // "⇧⌘S": one key cap per symbol, no plus signs (the Mac way).
+          const m = keys(alt).match(/^([⌃⌥⇧⌘]*)(.*)$/)!;
+          for (const sym of m[1]) span.append(el("kbd", { text: sym }));
+          if (m[2]) span.append(el("kbd", { text: m[2] }));
+          return;
+        }
         alt.split("+").forEach((k, j) => {
           if (j) span.append(el("span", { class: "plus", text: "+" }));
           span.append(el("kbd", { text: k }));
@@ -1423,11 +1431,11 @@ export class App {
   /** Cut / Copy / Paste / Paste special. */
   private clipboardItems(): MenuItem[] {
     return [
-      { label: "Cut", key: "Ctrl+X", action: () => this.clipboardWrite(this.grid.copy(true)) },
-      { label: "Copy", key: "Ctrl+C", action: () => this.clipboardWrite(this.grid.copy()) },
-      { label: "Paste", key: "Ctrl+V", action: () => this.clipboardPaste() },
+      { label: "Cut", key: keys("Ctrl+X"), action: () => this.clipboardWrite(this.grid.copy(true)) },
+      { label: "Copy", key: keys("Ctrl+C"), action: () => this.clipboardWrite(this.grid.copy()) },
+      { label: "Paste", key: keys("Ctrl+V"), action: () => this.clipboardPaste() },
       { label: "Paste special", children: [
-        { label: "Values only", key: "Ctrl+Shift+V", action: () => this.clipboardPaste("values") },
+        { label: "Values only", key: keys("Ctrl+Shift+V"), action: () => this.clipboardPaste("values") },
         { label: "Formatting only", action: () => this.clipboardPaste("format") },
         { label: "Without formatting", action: () => this.clipboardPaste("plain") },
         "sep",
@@ -1443,7 +1451,7 @@ export class App {
     if (zone === "row") { this.rowMenu(x, y); return; }
     if (zone === "corner") {
       showMenu([
-        { label: "Select all", key: "Ctrl+A", action: () => this.grid.selectAll() },
+        { label: "Select all", key: keys("Ctrl+A"), action: () => this.grid.selectAll() },
         { label: "Clear all filters", disabled: !d.filters.size, action: () => { d.clearFilters(); this.afterStructure(); } },
         { label: "Unhide all rows", disabled: !d.hiddenRowCount(), action: () => this.unhideRows() },
         { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.hidden.clear(); this.onChange(); } },
@@ -1466,13 +1474,13 @@ export class App {
       { label: "Delete", children: [rows.del, cols.del] },
       { label: "Clear", children: [
         { label: "Contents", key: "Delete", action: () => this.grid.clear() },
-        { label: "Formatting", key: "Ctrl+\\", action: () => this.applyFormat(() => ({}), "Clear formatting") },
+        { label: "Formatting", key: keys("Ctrl+\\"), action: () => this.applyFormat(() => ({}), "Clear formatting") },
         { label: "Everything", action: () => { this.grid.clear(); this.applyFormat(() => ({}), "Clear formatting"); } },
       ] },
       "sep",
       { label: "Formula", children: this.formulaItems() },
       ...extras,
-      { label: "Fill down", key: "Ctrl+D", action: () => this.grid.fillDown() },
+      { label: "Fill down", key: keys("Ctrl+D"), action: () => this.grid.fillDown() },
     ], x, y);
   }
 
@@ -1963,7 +1971,7 @@ export class App {
       items.push("sep");
     }
     items.push(
-      { label: "Duplicate", key: "Ctrl+D", action: () => L.duplicate(o.id) },
+      { label: "Duplicate", key: keys("Ctrl+D"), action: () => L.duplicate(o.id) },
       { label: "Bring to front", action: () => L.order(o.id, true) },
       { label: "Send to back", action: () => L.order(o.id, false) },
       "sep",
@@ -2024,7 +2032,7 @@ export class App {
 
   private async clipboardWrite(text: string | null) {
     if (text === null) { if (!this.active?.sel.extra?.length) toast("That selection is too big to copy", true); return; }
-    try { await navigator.clipboard.writeText(text); } catch { toast("Couldn't reach the clipboard — try Ctrl+C", true); }
+    try { await navigator.clipboard.writeText(text); } catch { toast(keys("Couldn't reach the clipboard — try Ctrl+C"), true); }
     this.onChange();
   }
 
@@ -2033,7 +2041,7 @@ export class App {
       const t = await navigator.clipboard.readText();
       if (t) this.grid.paste(t, mode);
     } catch {
-      toast("Use Ctrl+V to paste");
+      toast(keys("Use Ctrl+V to paste"));
     }
   }
 
@@ -2044,7 +2052,7 @@ export class App {
     localStorage.setItem("bento.toolbar", show ? "shown" : "hidden");
     document.getElementById("app")!.classList.toggle("toolbar-hidden", !show);
     const b = $("toolbar-toggle");
-    b.title = show ? "Hide the toolbar (Ctrl+Shift+F)" : "Show the toolbar (Ctrl+Shift+F)";
+    b.title = show ? keys("Hide the toolbar (Ctrl+Shift+F)") : keys("Show the toolbar (Ctrl+Shift+F)");
     b.classList.toggle("flipped", !show);
   }
 
@@ -2075,6 +2083,11 @@ export class App {
       if ((e.target as HTMLElement).hasAttribute("data-tauri-drag-region")) windowControls.toggleMaximize();
     });
     if (!isTauri) ($("titlebar").querySelector(".winctl") as HTMLElement).style.display = "none";
+    // On a Mac the window keeps its own traffic-light buttons (top left).
+    if (isMac) document.documentElement.classList.add("mac");
+    const sys = document.querySelector<HTMLElement>('[data-theme-opt="system"]');
+    if (sys) sys.title = `Match ${osName}`;
+    localiseTitles();
   }
 
   /**
@@ -2219,7 +2232,7 @@ export class App {
       else if (ctrl && k === "w") { e.preventDefault(); if (d) this.closeDoc(d); }
       else if (ctrl && e.shiftKey && k === "f") { e.preventDefault(); this.setToolbar(document.getElementById("app")!.classList.contains("toolbar-hidden")); }
       else if (ctrl && k === "f") { e.preventDefault(); if (d) this.find.open(false); }
-      else if (ctrl && k === "h") { e.preventDefault(); if (d) this.find.open(true); }
+      else if (ctrl && k === "h" && (!isMac || e.shiftKey)) { e.preventDefault(); if (d) this.find.open(true); }
       else if (ctrl && e.key === "Tab") {
         e.preventDefault();
         if (this.docs.length > 1 && d) {
@@ -2263,7 +2276,7 @@ export class App {
     window.addEventListener("blur", () => closeMenus());
     // Ctrl + mouse wheel zooms the grid.
     $("grid-wrap").addEventListener("wheel", (e) => {
-      if (!e.ctrlKey) return;
+      if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       this.stepZoom(e.deltaY < 0 ? 1 : -1);
     }, { passive: false });

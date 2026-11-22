@@ -244,7 +244,7 @@ export class ObjectLayer {
     node.addEventListener("keydown", (e) => this.onKey(e, o.id));
     // Scrolling over an object scrolls the sheet underneath.
     node.addEventListener("wheel", (e) => {
-      if (e.ctrlKey) return;
+      if (e.ctrlKey || e.metaKey) return;
       e.preventDefault();
       this.grid.scrollBy(e.shiftKey ? e.deltaY : e.deltaX, e.shiftKey ? 0 : e.deltaY);
     }, { passive: false });

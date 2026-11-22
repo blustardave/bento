@@ -1,3 +1,4 @@
+import { isMac } from "./platform";
 import { fromTSV, toTSV } from "./csv";
 import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, allRects, selRect } from "./doc";
 import { Engine, offsetFormula } from "./formula";
@@ -2115,7 +2116,7 @@ export class Grid {
     this.editor.classList.toggle("formula", formula);
     if (formula) {
       const px = 13 * z;
-      es.font = `${px}px "Cascadia Mono", "Cascadia Code", Consolas, "Courier New", monospace`;
+      es.font = `${px}px "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, "Courier New", monospace`;
       es.lineHeight = Math.round(px * 1.45) + "px";
       es.padding = `${Math.max(2, Math.round((this.rh - px * 1.45) / 2) - 2)}px ${this.pad - 1}px`;
       es.color = "";
@@ -2694,7 +2695,8 @@ export class Grid {
       }
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey && this.startReorder(zone, x, y)) { sc.setPointerCapture(e.pointerId); return; }
       const hit = !e.shiftKey && !e.ctrlKey && !e.metaKey ? this.widgetHit(x, y) : null;
-      this.pointSelect(zone, x, y, e.shiftKey, (e.ctrlKey || e.metaKey) && !e.shiftKey);
+      // On a Mac, Control-click is a right-click, so only ⌘ adds a range.
+      this.pointSelect(zone, x, y, e.shiftKey, (isMac ? e.metaKey : e.ctrlKey || e.metaKey) && !e.shiftKey);
       if (hit?.kind === "check") { this.toggleChecks([{ r: hit.r, c: hit.c }]); return; }
       if (hit?.kind === "list") { this.openDropdown(); return; }
       this.drag = zone === "col" ? { kind: "cols" } : zone === "row" ? { kind: "rows" } : zone === "cell" ? { kind: "cells" } : null;

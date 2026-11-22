@@ -1,0 +1,43 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Bento",
+        "width": 1240,
+        "height": 800,
+        "minWidth": 640,
+        "minHeight": 420,
+        "center": true,
+        "decorations": true,
+        "shadow": true,
+        "dragDropEnabled": true,
+        "backgroundColor": "#fcfbf8",
+        "visible": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 20
+        }
+      }
+    ]
+  },
+  "bundle": {
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    }
+  }
+}

@@ -1,3 +1,4 @@
+import { isMac } from "./platform";
 /* ------------------------------------------------------------------ *
  * Cell formatting: the style model, number/date formats and colours.
  * Formatting is display-only — it never changes a cell's raw value.
@@ -40,8 +41,11 @@ export interface Style {
   img?: string;
 }
 
-/** Fonts offered in the toolbar; all ship with Windows (Source Serif is bundled). */
-export const FONTS = ["Segoe UI", "Arial", "Calibri", "Cambria", "Georgia", "Times New Roman", "Verdana", "Consolas", "Source Serif 4"];
+/** Fonts offered in the toolbar; all ship with the OS (Source Serif is bundled).
+ * "Segoe UI" stands for the default font, which is the system font on a Mac. */
+export const FONTS = isMac
+  ? ["Segoe UI", "Arial", "Helvetica Neue", "Avenir Next", "Georgia", "Times New Roman", "Verdana", "Menlo", "Source Serif 4"]
+  : ["Segoe UI", "Arial", "Calibri", "Cambria", "Georgia", "Times New Roman", "Verdana", "Consolas", "Source Serif 4"];
 export const DEFAULT_FONT = "Segoe UI";
 
 export const DEFAULT_SIZE = 10;

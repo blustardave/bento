@@ -1,4 +1,4 @@
-name: Build Windows app
+name: Build Bento (Windows + Mac)
 
 on:
   push:
@@ -61,7 +61,9 @@ jobs:
           tagName: build-${{ github.run_number }}
           releaseName: "Bento 0.1.${{ github.run_number }}"
           releaseBody: |
-            **New here?** Download **Bento_0.1.${{ github.run_number }}_x64-setup.exe** below and run it.
+            **New here?**
+            - **Windows:** download **Bento_0.1.${{ github.run_number }}_x64-setup.exe** below and run it.
+            - **Mac:** download **Bento_0.1.${{ github.run_number }}_universal.dmg**, open it and drag Bento into Applications. The first time, macOS will say it can't check the app (it isn't notarised by Apple yet): open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**. You only need to do this once.
 
             **Already have Bento?** You don't need to download anything — it updates itself. Look for "Update ready" in the title bar.
 
@@ -69,3 +71,50 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+
+  mac:
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set version to 0.1.${{ github.run_number }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const f = 'src-tauri/tauri.conf.json';
+            const c = JSON.parse(fs.readFileSync(f, 'utf8'));
+            c.version = '0.1.${{ github.run_number }}';
+            fs.writeFileSync(f, JSON.stringify(c, null, 2));
+          "
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      # One app for both Apple Silicon and Intel Macs.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      # Adds the Mac files (and the Mac entries in latest.json) to the
+      # release the Windows job just made.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          tagName: build-${{ github.run_number }}
+          releaseName: "Bento 0.1.${{ github.run_number }}"
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          args: --target universal-apple-darwin

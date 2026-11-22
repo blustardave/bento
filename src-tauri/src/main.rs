@@ -74,10 +74,53 @@ fn remove_file(path: String) -> Result<(), String> {
     }
 }
 
+/// Files the OS asked us to open before the UI was listening. On Windows
+/// they come on the command line; on a Mac, Finder sends them as events.
+#[derive(Default)]
+struct Launch {
+    ready: std::sync::atomic::AtomicBool,
+    pending: std::sync::Mutex<Vec<String>>,
+}
+
 /// Files passed on the command line (e.g. via "Open with" / double-click).
 #[tauri::command]
-fn launch_files() -> Vec<String> {
-    file_args(std::env::args().collect())
+fn launch_files(state: tauri::State<'_, Launch>) -> Vec<String> {
+    let mut files = file_args(std::env::args().collect());
+    files.append(&mut state.pending.lock().unwrap());
+    state.ready.store(true, std::sync::atomic::Ordering::SeqCst);
+    files
+}
+
+/// The Mac menu bar. Copy/paste live here so they work in text boxes
+/// (and fire the page's copy/paste events on the grid); Quit goes through
+/// the window's close so unsaved changes still get asked about.
+#[cfg(target_os = "macos")]
+fn mac_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let quit = MenuItem::with_id(app, "quit", "Quit Bento", true, Some("CmdOrCtrl+Q"))?;
+    let bento = Submenu::with_items(app, "Bento", true, &[
+        &PredefinedMenuItem::about(app, Some("About Bento"), None)?,
+        &PredefinedMenuItem::separator(app)?,
+        &PredefinedMenuItem::hide(app, None)?,
+        &PredefinedMenuItem::hide_others(app, None)?,
+        &PredefinedMenuItem::show_all(app, None)?,
+        &PredefinedMenuItem::separator(app)?,
+        &quit,
+    ])?;
+    let edit = Submenu::with_items(app, "Edit", true, &[
+        &PredefinedMenuItem::undo(app, None)?,
+        &PredefinedMenuItem::redo(app, None)?,
+        &PredefinedMenuItem::separator(app)?,
+        &PredefinedMenuItem::cut(app, None)?,
+        &PredefinedMenuItem::copy(app, None)?,
+        &PredefinedMenuItem::paste(app, None)?,
+    ])?;
+    let window = Submenu::with_items(app, "Window", true, &[
+        &PredefinedMenuItem::minimize(app, None)?,
+        &PredefinedMenuItem::maximize(app, None)?,
+        &PredefinedMenuItem::fullscreen(app, None)?,
+    ])?;
+    Menu::with_items(app, &[&bento, &edit, &window])
 }
 
 fn file_args(argv: Vec<String>) -> Vec<String> {
@@ -105,7 +148,18 @@ fn percent_decode(s: &str) -> Result<String, String> {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default().manage(Launch::default());
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(|app| mac_menu(app))
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "quit" {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.close();
+                }
+            }
+        });
+    builder
         // A second launch (double-clicking another CSV) opens it in the
         // existing window instead of starting a new copy of the app.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -145,6 +199,26 @@ fn main() {
             list_dir,
             remove_file
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Bento");
+        .build(tauri::generate_context!())
+        .expect("error while running Bento")
+        .run(|_app, _event| {
+            // Finder double-click / "Open With" on a Mac.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = _event {
+                let files: Vec<String> = urls
+                    .iter()
+                    .filter_map(|u| u.to_file_path().ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                let state = _app.state::<Launch>();
+                if state.ready.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = _app.emit("open-files", files);
+                    if let Some(w) = _app.get_webview_window("main") {
+                        let _ = w.set_focus();
+                    }
+                } else {
+                    state.pending.lock().unwrap().extend(files);
+                }
+            }
+        });
 }
