@@ -1354,7 +1354,7 @@ export class App {
           // "⇧⌘S": one key cap per symbol, no plus signs (the Mac way).
           const m = keys(alt).match(/^([⌃⌥⇧⌘]*)(.*)$/)!;
           for (const sym of m[1]) span.append(el("kbd", { text: sym }));
-          if (m[2]) span.append(el("kbd", { text: m[2] }));
+          if (m[2]) span.append(el("kbd", { text: m[2] === "Enter" ? "Return" : m[2] }));
           return;
         }
         alt.split("+").forEach((k, j) => {
