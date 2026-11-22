@@ -41,7 +41,12 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
+    "publisher": "blustardave",
+    "copyright": "Copyright © 2026 blustardave",
+    "homepage": "https://github.com/blustardave/bento",
+    "category": "Productivity",
     "shortDescription": "A minimal, fast CSV editor",
+    "longDescription": "Bento is a minimal, lightweight spreadsheet and CSV editor for Windows.",
     "fileAssociations": [
       {
         "ext": [

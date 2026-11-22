@@ -2,6 +2,9 @@
 name = "bento"
 version = "0.1.0"
 description = "A minimal, fast CSV editor"
+authors = ["blustardave"]
+repository = "https://github.com/blustardave/bento"
+homepage = "https://github.com/blustardave/bento"
 edition = "2021"
 
 [build-dependencies]
@@ -19,6 +22,5 @@ serde_json = "1"
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = "s"
-panic = "abort"
-strip = true
+opt-level = 3
+strip = "debuginfo"
