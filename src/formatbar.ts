@@ -1,6 +1,6 @@
 /** Formatting controls for the toolbar, laid out like Google Sheets' (minus the clutter). */
 import {
-  DEFAULT_FONT, DEFAULT_SIZE, FONTS, FONT_SIZES, HAlign, HUES, Rotation, Style, VAlign, Wrap,
+  DEFAULT_FONT, DEFAULT_SIZE, FONTS, FONT_SIZES, HAlign, HUES, NumFmt, Rotation, Style, VAlign, Wrap,
   colorLabel, defaultCurrency, resolveColor, shownDecimals,
 } from "./format";
 import { IconName, ToolButton, icon, toolButton } from "./toolbar";
@@ -68,10 +68,25 @@ export class FormatBar {
       t("decUp", decimalButton(".00", "right", "Increase decimal places", () => this.stepDecimals(1))),
       t("numFmt", toolButton({ glyph: "123", glyphClass: "sym small", caret: true, title: "More formats", onClick: (b) => {
         const r = b.getBoundingClientRect();
-        const isText = c.active()?.style.nf?.k === "text";
+        const nf = c.active()?.style.nf;
+        const cur = defaultCurrency();
+        const set = (label: string, f: NumFmt | undefined) => () => c.apply((s) => ({ ...s, nf: f }), label);
+        const is = (k: NumFmt["k"], extra: (f: NumFmt) => boolean = () => true) => !!nf && nf.k === k && extra(nf);
         b.classList.add("open");
         showMenu([
-          { label: "Plain text", checked: isText, action: () => c.apply((s) => ({ ...s, nf: isText ? undefined : { k: "text" } }), "Plain text") },
+          { label: "Automatic", key: "1234.5", checked: !nf, action: set("Automatic format", undefined) },
+          { label: "Plain text", key: "As typed", checked: is("text"), action: set("Plain text", { k: "text" }) },
+          "sep",
+          { label: "Number", key: "1,234.50", checked: is("num", (f) => !!f.sep && f.dp === 2), action: set("Number format", { k: "num", dp: 2, sep: true }) },
+          { label: "Whole number", key: "1,235", checked: is("num", (f) => !!f.sep && f.dp === 0), action: set("Number format", { k: "num", dp: 0, sep: true }) },
+          { label: "Thousands separators", key: "1,234.5", checked: is("num", (f) => !!f.sep && f.dp === undefined), action: set("Number format", { k: "num", sep: true }) },
+          { label: "Percent", key: "12.35%", checked: is("pct"), action: set("Percent", { k: "pct", dp: 2 }) },
+          { label: "Currency", key: `${cur.trim()}1,234.50`, checked: is("cur"), action: set("Currency", { k: "cur", cur, dp: 2, sep: true }) },
+          "sep",
+          { label: "Date", key: "2026-11-28", checked: is("date", (f) => (f.date ?? "iso") === "iso"), action: set("Date format", { k: "date", date: "iso" }) },
+          { label: "Date (day first)", key: "28/11/2026", checked: is("date", (f) => f.date === "dmy"), action: set("Date format", { k: "date", date: "dmy" }) },
+          { label: "Date (month first)", key: "11/28/2026", checked: is("date", (f) => f.date === "mdy"), action: set("Date format", { k: "date", date: "mdy" }) },
+          { label: "Date (long)", key: "28 Nov 2026", checked: is("date", (f) => f.date === "long"), action: set("Date format", { k: "date", date: "long" }) },
         ], r.left, r.bottom + 4, () => b.classList.remove("open"));
       } })),
     ];
@@ -121,7 +136,7 @@ export class FormatBar {
     const size = [el("div", { class: "stepper" }, minus.el, this.size, plus.el)];
 
     /* Text style */
-    const toggle = (key: "b" | "i" | "s", label: string) => () => {
+    const toggle = (key: "b" | "i" | "u" | "s", label: string) => () => {
       const a = c.active();
       const on = a ? !!(a.style[key] ?? (key === "b" && a.header)) : false;
       c.apply((s) => ({ ...s, [key]: on ? (key === "b" && a?.header ? false : undefined) : true }), label);
@@ -129,6 +144,7 @@ export class FormatBar {
     const text = [
       t("b", toolButton({ icon: "bold", title: keys("Bold (Ctrl+B)"), onClick: toggle("b", "Bold") })),
       t("i", toolButton({ icon: "italic", title: keys("Italic (Ctrl+I)"), onClick: toggle("i", "Italic") })),
+      t("u", toolButton({ icon: "underline", title: keys("Underline (Ctrl+U)"), onClick: toggle("u", "Underline") })),
       t("s", toolButton({ icon: "strike", title: keys("Strikethrough (Alt+Shift+5)"), onClick: toggle("s", "Strikethrough") })),
       t("color", toolButton({ icon: "textColor", title: "Text colour", onClick: (b) => this.palette(b, "color") })),
     ];
@@ -228,12 +244,13 @@ export class FormatBar {
     const theme = this.ctx.theme();
     this.t.b.set({ on: !!(s.b ?? a.header) });
     this.t.i.set({ on: !!s.i });
+    this.t.u.set({ on: !!s.u });
     this.t.s.set({ on: !!s.s });
     this.t.pct.set({ on: s.nf?.k === "pct" });
     this.t.cur.set({ on: s.nf?.k === "cur" });
     const g = this.t.cur.el.querySelector(".glyph");
     if (g) g.textContent = (s.nf?.k === "cur" ? s.nf.cur ?? defaultCurrency() : defaultCurrency()).trim();
-    this.t.numFmt.set({ on: s.nf?.k === "text" });
+    this.t.numFmt.set({ on: !!s.nf && s.nf.k !== "cur" && s.nf.k !== "pct" });
     this.t.merge.set({ on: this.ctx.selectionMerged() });
     this.fontLabel.textContent = !s.font || s.font === DEFAULT_FONT ? "Default" : s.font;
     this.fontLabel.style.fontFamily = s.font ? `"${s.font}", var(--font-ui)` : "";

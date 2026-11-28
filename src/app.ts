@@ -1,4 +1,4 @@
-import { CsvParser, Delimiter, LineEnding, sniffDelimiter, sniffLineEnding } from "./csv";
+import { CsvParser, Delimiter, LineEnding, looksLikeHeader, sniffDelimiter, sniffLineEnding } from "./csv";
 import { Book, Doc, allRects, selRect } from "./doc";
 import { Encoding, decodeBytes, encodeText } from "./encoding";
 import { openFilter } from "./filter";
@@ -11,8 +11,8 @@ import { validName } from "./fcore";
 import { ACCENTS, applyAccent } from "./accent";
 import { decodeBento, encodeBento, isBentoPath, looksLikeBento, sheetFromData, sheetToData } from "./bento";
 import {
-  FileRef, isTauri, launchFiles, onFileDrop, onOpenFiles, pickFiles, pickSavePath, readFile,
-  windowControls, writeFile,
+  FileRef, forgetRecent, isNotAllowed, isTauri, launchFiles, noteRecent, onFileDrop, onOpenFiles, pickFiles, pickSavePath, readFile,
+  recentFiles, windowControls, writeFile,
 } from "./native";
 import { MenuItem, closeMenus, formDialog, modal, showMenu, toast } from "./ui";
 import { ToolButton, divider, grow, toolButton } from "./toolbar";
@@ -25,8 +25,9 @@ import { ObjectLayer, SHAPES } from "./objects";
 import { CHART_TYPES, chartData, dataRegion, parseRange, rangeText } from "./chart";
 import type { ChartObject, ChartType, ShapeObject, ShapeType, SheetObject } from "./doc";
 import { appVersion, initUpdater } from "./updater";
-import { basename, cellName, clamp, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
-import { isMac, keys, localiseTitles, osName } from "./platform";
+import { basename, cellName, clamp, colIndex, colName, el, formatInt, formatStat, maxOf, nextFrame, parseNum } from "./util";
+import { cmdKey, isAltGr, isMac, keys, localiseTitles, osName } from "./platform";
+import { WheelZoom } from "./wheelzoom";
 
 type Theme = "system" | "light" | "dusk" | "dark";
 const $ = (id: string) => document.getElementById(id)!;
@@ -77,6 +78,7 @@ export class App {
       onRender: () => this.objects?.render(),
       onDropdown: (r, c, x, y) => this.dropdownMenu(r, c, x, y),
       onPasteImage: (f) => this.insertImageFile(f, "over"),
+      onPasteValues: () => this.clipboardPaste("values"),
     });
     this.objects = new ObjectLayer(this.grid, {
       doc: () => this.active,
@@ -95,6 +97,7 @@ export class App {
   }
 
   private async startup() {
+    await this.loadRecent();
     await this.autosaver.start();
     this.offerRecovery();
     onFileDrop(
@@ -242,6 +245,8 @@ export class App {
     doc.widths.clear();
     doc.filters.clear();
     doc.view = null;
+    // A heading row stays put when sorting/filtering (and shows as one).
+    doc.frozenRows = looksLikeHeader(p.rows, (s) => !Number.isNaN(parseNum(s))) ? 1 : 0;
     doc.loading = null;
     this.grid.autoFitInitial(doc);
     doc.remeasureAll(); // rows with line breaks grow to fit
@@ -260,12 +265,16 @@ export class App {
 
   async closeDoc(doc: Doc): Promise<boolean> {
     if (this.grid.editing && this.active === doc) this.grid.commitEdit();
+    let autoSaveFailed = false;
     if (doc.book.dirty && this.autosaver.canAutoSave(doc.book)) {
-      if (!(await this.saveQuietly(doc.book))) return false;
+      // If the quiet save fails (file locked, drive gone…), fall through to
+      // asking: never leave the tab impossible to close.
+      autoSaveFailed = !(await this.saveQuietly(doc.book));
     }
     if (doc.book.dirty) {
       if (this.active !== doc) this.activate(doc);
-      const choice = await modal(`Save changes to ${doc.name}?`, "Your changes will be lost if you don't save them.", [
+      const why = autoSaveFailed ? `AutoSave couldn't write to ${doc.name}, so your latest changes aren't saved yet.` : "Your changes will be lost if you don't save them.";
+      const choice = await modal(`Save changes to ${doc.name}?`, why, [
         { label: "Cancel", value: "cancel" },
         { label: "Don't save", value: "discard" },
         { label: "Save", value: "save", primary: true },
@@ -297,13 +306,21 @@ export class App {
       await writeFile(book.path, await encodeBento(book));
       // Only mark saved if nothing changed while writing.
       if (book.token === token) book.markSaved();
+      this.autoSaveWarned.delete(book.id);
       this.render();
       return true;
     } catch (e) {
       console.warn("AutoSave couldn't write", e);
+      // Say so once (until it works again): a silent failure looks like it's saving.
+      if (!this.autoSaveWarned.has(book.id)) {
+        this.autoSaveWarned.add(book.id);
+        toast(`AutoSave couldn't save ${book.name}. Your changes are kept safe — use Save As to save them somewhere else.`, true);
+      }
       return false;
     }
   }
+
+  private autoSaveWarned = new Set<string>();
 
   /** After a crash: offer back any recovery copies that were left behind. */
   private async offerRecovery() {
@@ -349,34 +366,78 @@ export class App {
     this.activate(book.sheet);
   }
 
-  /** Save as a .bento sheet (keeps formatting, formulas, widths…). */
+  /**
+   * Save. A .bento saves in place; a CSV you opened saves back to the same
+   * CSV (with the separator, encoding and line endings it came with) —
+   * asking first if the sheet has things a CSV can't hold. Anything else, or
+   * Save As, asks where to put a .bento.
+   */
   async save(doc: Doc | null = this.active, saveAs = false): Promise<boolean> {
     if (!doc || doc.loading !== null) return false;
     if (this.grid.editing && this.active === doc) this.grid.commitEdit();
+    if (!saveAs && isTauri && doc.path && CSV_PATH.test(doc.path) && doc.book.sheets.length === 1) {
+      const r = await this.saveCsvInPlace(doc);
+      if (r !== "bento") return r === "saved";
+    }
     let path = doc.path;
     if (!path || !isBentoPath(path) || saveAs || !isTauri) {
-      // A CSV you opened gets a .bento next to it; the CSV is left alone.
       const suggested = (doc.path ?? doc.name).replace(/\.[^.\\/]+$/, "") + ".bento";
       path = await pickSavePath(suggested, "bento");
       if (!path) return false;
-      if (!isBentoPath(path)) path += ".bento";
     }
     try {
       await writeFile(path, await encodeBento(doc.book));
-      doc.path = path;
-      doc.name = basename(path);
-      if (isTauri) doc.source = { name: doc.name, path };
-      doc.book.markSaved();
-      this.autosaver.discard(doc.book.id);
-      this.autosaver.settled(doc.book);
-      this.addRecent(path);
-      this.render();
-      toast(`Saved ${doc.name}`);
-      return true;
     } catch (e) {
+      // A file from an earlier session that Bento may no longer write to: ask where instead.
+      if (isNotAllowed(e) && !saveAs) return this.save(doc, true);
       toast(String(e instanceof Error ? e.message : e), true);
       return false;
     }
+    doc.path = path;
+    doc.name = basename(path);
+    if (isTauri) doc.source = { name: doc.name, path };
+    doc.book.markSaved();
+    this.autosaver.discard(doc.book.id);
+    this.autosaver.settled(doc.book);
+    this.addRecent(path);
+    this.render();
+    toast(`Saved ${doc.name}`);
+    return true;
+  }
+
+  /** Files this sheet already said "yes, save as plain CSV" for (this session). */
+  private csvLossOk = new WeakSet<Book>();
+
+  /** Save an opened CSV back to itself. "bento" means: save a .bento copy instead. */
+  private async saveCsvInPlace(doc: Doc): Promise<"saved" | "cancel" | "bento"> {
+    const lost: string[] = [];
+    if (doc.hasFormatting()) lost.push(doc.objects.length ? "formatting, charts and pictures" : "formatting");
+    if (doc.merges.length) lost.push("merged cells");
+    if (doc.book.names.size) lost.push("named ranges");
+    if (lost.length && !this.csvLossOk.has(doc.book)) {
+      const formulas = doc.hasFormulas() ? (doc.saveFormulasAs === "formulas" ? " Formulas are saved as text." : " Formulas are saved as their results.") : "";
+      const choice = await modal(`Save ${doc.name} as plain CSV?`,
+        `A CSV only holds the values in this sheet, so the ${lost.join(", ")} won't be kept.${formulas} To keep everything, save a Bento copy instead.`,
+        [{ label: "Cancel", value: "cancel" as const }, { label: "Save a Bento copy…", value: "bento" as const }, { label: "Save CSV", value: "csv" as const, primary: true }]);
+      if (choice === null || choice === "cancel") return "cancel";
+      if (choice === "bento") return "bento";
+      this.csvLossOk.add(doc.book);
+    }
+    try {
+      const text = doc.toText(doc.saveFormulasAs !== "formulas");
+      await writeFile(doc.path!, encodeText(text, doc.encoding, doc.bom));
+    } catch (e) {
+      if (isNotAllowed(e)) return "bento";
+      toast(String(e instanceof Error ? e.message : e), true);
+      return "cancel";
+    }
+    doc.book.markSaved();
+    this.autosaver.discard(doc.book.id);
+    this.autosaver.settled(doc.book);
+    this.addRecent(doc.path);
+    this.render();
+    toast(`Saved ${doc.name}`);
+    return "saved";
   }
 
   /**
@@ -393,9 +454,8 @@ export class App {
     if (opts.formulas) doc.saveFormulasAs = opts.formulas;
     const base = (doc.path ?? doc.name).replace(/\.[^.\\/]+$/, "");
     const sheetPart = doc.book.sheets.length > 1 ? ` - ${doc.sheetName}` : "";
-    let path = await pickSavePath(base + sheetPart + (doc.delim === "\t" ? ".tsv" : ".csv"), "csv");
+    const path = await pickSavePath(base + sheetPart + (doc.delim === "\t" ? ".tsv" : ".csv"), "csv");
     if (!path) return false;
-    if (!/\.(csv|tsv|txt)$/i.test(path)) path += ".csv";
     try {
       const text = doc.toText(doc.saveFormulasAs !== "formulas");
       await writeFile(path, encodeText(text, doc.encoding, doc.bom));
@@ -506,10 +566,11 @@ export class App {
     const book = doc.book;
     if (doc.protected) { toast(`"${doc.sheetName}" is protected — unprotect it first`); return; }
     if (book.sheets.length < 2) { toast("A file needs at least one sheet"); return; }
-    if (doc.rows.length) {
+    if (doc.rows.length || doc.objects.length) {
+      // Enter cancels here: deleting a sheet can't be undone.
       const ok = await modal(`Delete "${doc.sheetName}"?`, "This removes the sheet and everything on it. You can't undo this.", [
-        { label: "Cancel", value: false },
-        { label: "Delete", value: true, primary: true },
+        { label: "Delete", value: true, danger: true },
+        { label: "Cancel", value: false, primary: true },
       ]);
       if (!ok) return;
     }
@@ -735,19 +796,28 @@ export class App {
 
   /* -------------------------------- recent -------------------------------- */
 
+  /** Recent files, most recent first (kept by the Rust side in the app). */
+  private recentList: string[] = [];
+
   private recent(): string[] {
-    try { return JSON.parse(localStorage.getItem("bento.recent") ?? "[]"); } catch { return []; }
+    return this.recentList;
+  }
+
+  private async loadRecent() {
+    try { this.recentList = await recentFiles(); } catch (e) { console.warn(e); }
+    if (!this.docs.length) this.render();
   }
 
   private addRecent(path: string | null) {
     if (!path) return;
-    const list = [path, ...this.recent().filter((p) => p.toLowerCase() !== path.toLowerCase())].slice(0, 8);
-    localStorage.setItem("bento.recent", JSON.stringify(list));
+    this.recentList = [path, ...this.recentList.filter((p) => p.toLowerCase() !== path.toLowerCase())].slice(0, 8);
+    noteRecent(path).catch((e) => console.warn(e));
   }
 
   private forget(path: string | null) {
     if (!path) return;
-    localStorage.setItem("bento.recent", JSON.stringify(this.recent().filter((p) => p !== path)));
+    this.recentList = this.recentList.filter((p) => p !== path);
+    forgetRecent(path).catch((e) => console.warn(e));
   }
 
   /* ------------------------------- rendering ------------------------------- */
@@ -1031,7 +1101,6 @@ export class App {
       divider(), ...f.fill,
       divider(), ...f.align,
       divider(),
-      t("link", toolButton({ icon: "link", title: "Insert link (coming soon)", onClick: () => {} })),
       t("filter", toolButton({ icon: "filter", title: "Filter column", onClick: (b) => withDoc((d) => {
         const r = b.getBoundingClientRect();
         openFilter(d, d.sel.ac, r.left, r.bottom + 4, () => this.afterStructure());
@@ -1068,6 +1137,25 @@ export class App {
     }
     this.grid.select({ ar: s.r0, ac: s.c0, fr: s.r1, fc: s.c1 }, false);
     this.onChange();
+  }
+
+  /** "Sort range" for a block of selected cells (not whole columns, which sort the sheet). */
+  private sortRangeItems(): MenuItem[] {
+    const d = this.active!;
+    const s = selRect(d.sel);
+    if (s.r1 <= s.r0 || this.grid.isWholeCols(s) || d.sel.extra?.length) return [];
+    const by = colName(d.sel.ac);
+    const run = (desc: boolean) => {
+      if (d.view) { toast("Clear filters and show hidden rows before sorting a range"); return; }
+      // A frozen heading row stays where it is.
+      const r0 = Math.max(s.r0, Math.min(d.frozenRows, s.r1)), r1 = Math.min(s.r1, d.rows.length - 1);
+      if (!d.sortRange(r0, r1, s.c0, s.c1, d.sel.ac, desc)) { toast("Can't sort a range with merged cells in it"); return; }
+      this.afterStructure();
+    };
+    return [{ label: "Sort range", children: [
+      { label: "A → Z", key: `by ${by}`, action: () => run(false) },
+      { label: "Z → A", key: `by ${by}`, action: () => run(true) },
+    ] }];
   }
 
   /** Sort, unless merged cells make it impossible. */
@@ -1120,7 +1208,12 @@ export class App {
       return;
     }
     const cells: { r: number; c: number; v: string }[] = [];
-    const below = s.r1 + 1;
+    // The first row below the selection with room for the totals (never
+    // writing over something that's already there).
+    const free = (r: number) => { for (let c = s.c0; c <= s.c1; c++) if (d.raw(d.dataRow(r), c) !== "") return false; return true; };
+    let below = s.r1 + 1;
+    while (!free(below) && below < s.r1 + 10_000) below++;
+    if (!free(below)) { toast("There's no empty row below the selection for the totals"); return; }
     const top = d.dataRow(s.r0) + 1;
     const bottom = d.dataRow(s.r1) + 1;
     for (let c = s.c0; c <= s.c1; c++) {
@@ -1155,7 +1248,7 @@ export class App {
       "sep",
       { label: "Unfreeze rows and columns", disabled: !d || (!d.frozenRows && !d.frozenCols), action: () => { d!.setFrozen(0, 0); this.afterFreeze(); } },
       { label: "Clear all filters", disabled: !d?.filters.size, action: () => { d!.clearFilters(); this.afterStructure(); } },
-      { label: "Unhide all columns", disabled: !d?.hidden.size, action: () => { d!.hidden.clear(); this.onChange(); } },
+      { label: "Unhide all columns", disabled: !d?.hidden.size, action: () => { d!.setColumnsHidden("all", false); this.onChange(); } },
       "sep",
       { label: "Preferences…", key: keys("Ctrl+,"), action: () => this.preferences() },
       { label: "Keyboard shortcuts", key: "F1", action: () => this.shortcuts() },
@@ -1173,7 +1266,7 @@ export class App {
 
   private preferences(section = "appearance") {
     closeMenus();
-    const isTauriApp = !document.getElementById("check-btn")!.hidden;
+    const isTauriApp = isTauri;
     const row = (label: string, hint: string | null, control: HTMLElement) =>
       el("div", { class: "prow" }, el("div", { class: "plabel" }, el("b", { text: label }), hint ? el("small", { text: hint }) : null), el("div", { class: "pctl" }, control));
     const seg = (opts: [string, string][], value: string, onPick: (v: string) => void) => {
@@ -1254,7 +1347,7 @@ export class App {
 
     /* Saving */
     const saving = el("div", { class: "psec" },
-      row("AutoSave", "Saved .bento files save themselves as you work. CSVs are never overwritten without asking.", sw(flag("bento.autosave"), (v) => localStorage.setItem("bento.autosave", v ? "on" : "off"))),
+      row("AutoSave", keys("Saved .bento files save themselves as you work. CSVs are never overwritten automatically — Ctrl+S saves them."), sw(flag("bento.autosave"), (v) => localStorage.setItem("bento.autosave", v ? "on" : "off"))),
       row("Crash recovery", "Unsaved work is always kept safe in the background and offered back if Bento closes unexpectedly.", el("span", { class: "pnote", text: "Always on" })),
     );
 
@@ -1454,7 +1547,7 @@ export class App {
         { label: "Select all", key: keys("Ctrl+A"), action: () => this.grid.selectAll() },
         { label: "Clear all filters", disabled: !d.filters.size, action: () => { d.clearFilters(); this.afterStructure(); } },
         { label: "Unhide all rows", disabled: !d.hiddenRowCount(), action: () => this.unhideRows() },
-        { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.hidden.clear(); this.onChange(); } },
+        { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.setColumnsHidden("all", false); this.onChange(); } },
       ], x, y);
       return;
     }
@@ -1478,6 +1571,7 @@ export class App {
         { label: "Everything", action: () => { this.grid.clear(); this.applyFormat(() => ({}), "Clear formatting"); } },
       ] },
       "sep",
+      ...this.sortRangeItems(),
       { label: "Formula", children: this.formulaItems() },
       ...extras,
       { label: "Fill down", key: keys("Ctrl+D"), action: () => this.grid.fillDown() },
@@ -1605,8 +1699,7 @@ export class App {
     const what = n === 1 ? "column" : `${n} columns`;
     const cols = this.colItems();
     const hideRange = () => {
-      for (let i = s.c0; i <= s.c1; i++) d.hidden.add(i);
-      d.version++;
+      d.setColumnsHidden(Array.from({ length: s.c1 - s.c0 + 1 }, (_, k) => s.c0 + k), true);
       // Move the selection off the hidden columns.
       const next = s.c1 + 1 < d.displayCols() ? s.c1 + 1 : Math.max(0, s.c0 - 1);
       this.grid.select({ ar: d.sel.ar, ac: next, fr: d.sel.ar, fc: next }, false);
@@ -1630,7 +1723,7 @@ export class App {
         "sep",
         { label: `Freeze up to column ${colName(s.c1)}`, action: () => { d.setFrozen(d.frozenRows, s.c1 + 1); this.afterFreeze(); } },
         { label: "Unfreeze columns", disabled: !d.frozenCols, action: () => { d.setFrozen(d.frozenRows, 0); this.afterFreeze(); } },
-        { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.hidden.clear(); this.onChange(); } },
+        { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.setColumnsHidden("all", false); this.onChange(); } },
       ] },
     ], x, y);
   }
@@ -1671,7 +1764,8 @@ export class App {
     const s = selRect(d.sel);
     const want = rows.length ? rows : [];
     if (!want.length) for (let r = s.r0; r <= s.r1; r++) want.push(d.dataRow(r));
-    while (d.rows.length <= Math.max(...want)) d.rows.push(new Array(d.cols).fill(""));
+    const lastWanted = maxOf(want, -1);
+    while (d.rows.length <= lastWanted) d.rows.push(new Array(d.cols).fill(""));
     if (want.length >= d.displayRows()) { toast("At least one row has to stay visible"); return; }
     d.setRowsHidden(want, true);
     this.grid.select({ ar: s.r0, ac: d.sel.ac, fr: s.r0, fc: d.sel.ac }, false);
@@ -1710,7 +1804,13 @@ export class App {
       if (mode.v === "set") {
         const v = Number(input.value);
         if (!Number.isFinite(v) || v <= 0) { input.focus(); return false; }
-        if (isCol) { for (let c = s.c0; c <= s.c1; c++) d.widths.set(c, clamp(Math.round(v), 20, 2000)); d.remeasureAll(); d.version++; this.grid.invalidate(); this.onChange(); }
+        if (isCol) {
+          const before = new Map(d.widths);
+          for (let c = s.c0; c <= s.c1; c++) d.widths.set(c, clamp(Math.round(v), 20, 2000));
+          d.commitWidths(before, "Resize columns");
+          this.grid.invalidate();
+          this.onChange();
+        }
         else { d.setRowHeights(this.selectedDataRows(), clamp(Math.round(v), 12, 1000)); this.onChange(); }
       } else {
         if (isCol) for (let c = s.c0; c <= s.c1; c++) this.grid.autoFit(c);
@@ -2031,7 +2131,7 @@ export class App {
   }
 
   private async clipboardWrite(text: string | null) {
-    if (text === null) { if (!this.active?.sel.extra?.length) toast("That selection is too big to copy", true); return; }
+    if (text === null) return; // the grid has already said why
     try { await navigator.clipboard.writeText(text); } catch { toast(keys("Couldn't reach the clipboard — try Ctrl+C"), true); }
     this.onChange();
   }
@@ -2153,7 +2253,7 @@ export class App {
           const d = this.active;
           const p = nameProblem(d.book, v);
           if (p) { toast(p, true); box.select(); return; }
-          defineName(d.book, v, this.selectionRef());
+          defineName(d, v, this.selectionRef());
           toast(`Named ${this.selectionRef()} "${v}" — use it in formulas, e.g. =SUM(${v})`);
           box.blur(); this.grid.focus(); this.onSelection();
         }
@@ -2197,11 +2297,30 @@ export class App {
     this.grid.editor.addEventListener("input", () => { input.value = this.grid.editor.value; });
   }
 
+  private wheelZoom = new WheelZoom(isMac);
+
+  /** Ctrl + wheel / pinch zoom (see wheelzoom.ts for why it's careful). */
+  private onZoomWheel(e: WheelEvent) {
+    const a = this.wheelZoom.handle(e, performance.now());
+    if (a.kind === "scroll") return; // let the sheet scroll
+    e.preventDefault();
+    if (a.kind === "step") this.stepZoom(a.dir);
+    else if (a.kind === "scale") this.setZoom(this.grid.zoom * a.factor);
+  }
+
   private bindKeys() {
     window.addEventListener("keydown", (e) => {
-      const ctrl = e.ctrlKey || e.metaKey;
+      // AltGr types characters (\ ] @ € …) on many keyboards: let it.
+      if (isAltGr(e)) return;
+      const ctrl = cmdKey(e);
       const k = e.key.toLowerCase();
       const d = this.active;
+      // The web view's own reload (and print) would throw away every open tab.
+      // Ctrl+Shift+R is still "align right" below.
+      if ((ctrl && (k === "r" || k === "p")) || e.key === "BrowserRefresh") {
+        e.preventDefault();
+        if (!(ctrl && e.shiftKey && k === "r" && d)) return;
+      }
       const typing = (() => { const a = document.activeElement; return a instanceof HTMLInputElement || a instanceof HTMLSelectElement || a === this.grid.editor; })();
       if (ctrl && k === "a" && d && !typing && !e.defaultPrevented) { e.preventDefault(); this.grid.selectAll(); this.grid.focus(); }
       else if (ctrl && k === "n") { e.preventDefault(); this.newDoc(); }
@@ -2233,7 +2352,7 @@ export class App {
       else if (ctrl && e.shiftKey && k === "f") { e.preventDefault(); this.setToolbar(document.getElementById("app")!.classList.contains("toolbar-hidden")); }
       else if (ctrl && k === "f") { e.preventDefault(); if (d) this.find.open(false); }
       else if (ctrl && k === "h" && (!isMac || e.shiftKey)) { e.preventDefault(); if (d) this.find.open(true); }
-      else if (ctrl && e.key === "Tab") {
+      else if (e.ctrlKey && e.key === "Tab") { // Control+Tab on a Mac too
         e.preventDefault();
         if (this.docs.length > 1 && d) {
           const i = this.docs.indexOf(d);
@@ -2251,7 +2370,7 @@ export class App {
         const next = sh[(i + (e.key === "PageDown" ? 1 : -1) + sh.length) % sh.length];
         if (next !== d) this.showSheet(next);
       }
-      else if (ctrl && e.altKey && (e.key === "-" || e.code === "Minus") && d) {
+      else if (ctrl && e.altKey && (e.key === "-" || (isMac && e.code === "Minus")) && d) { // ⌥- types "–" on a Mac
         // Delete selected whole rows or columns (Sheets: Ctrl+Alt+-).
         e.preventDefault();
         const s = selRect(d.sel);
@@ -2274,12 +2393,8 @@ export class App {
       });
     });
     window.addEventListener("blur", () => closeMenus());
-    // Ctrl + mouse wheel zooms the grid.
-    $("grid-wrap").addEventListener("wheel", (e) => {
-      if (!e.ctrlKey && !e.metaKey) return;
-      e.preventDefault();
-      this.stepZoom(e.deltaY < 0 ? 1 : -1);
-    }, { passive: false });
+    // Ctrl + wheel (or a trackpad pinch) zooms the grid.
+    $("grid-wrap").addEventListener("wheel", (e) => this.onZoomWheel(e), { passive: false });
   }
 }
 
@@ -2293,6 +2408,8 @@ function svg(inner: string, size: number, cls = ""): SVGElement {
 }
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+/** Files that save back as CSV/TSV text. */
+const CSV_PATH = /\.(csv|tsv|txt|tab)$/i;
 
 const CHART_ICONS: Record<ChartType, string> = {
   column: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M3.5 13V8.5M8 13V3.5M12.5 13V6.5" stroke-width="2.2"/></svg>',

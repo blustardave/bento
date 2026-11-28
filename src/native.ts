@@ -12,21 +12,14 @@ export interface FileRef {
   file?: File; // browser fallback only
 }
 
-const OPEN_FILTERS = [
-  { name: "Sheets", extensions: ["bento", "csv", "tsv", "txt", "tab"] },
-  { name: "All files", extensions: ["*"] },
-];
-const SAVE_FILTERS = {
-  bento: [{ name: "Bento sheet", extensions: ["bento"] }],
-  csv: [{ name: "CSV", extensions: ["csv"] }, { name: "TSV", extensions: ["tsv"] }],
-};
-
+/**
+ * The file dialogs run in the Rust side: a path only becomes readable or
+ * writable once the user has picked it there (see src-tauri/src/access.rs).
+ */
 export async function pickFiles(): Promise<FileRef[]> {
   if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const res = await open({ multiple: true, filters: OPEN_FILTERS });
-    if (!res) return [];
-    const list = Array.isArray(res) ? res : [res];
+    const { invoke } = await import("@tauri-apps/api/core");
+    const list = await invoke<string[]>("pick_open");
     return list.map((p) => ({ name: basename(p), path: p }));
   }
   return new Promise((resolve) => {
@@ -46,13 +39,54 @@ export async function readFile(ref: FileRef): Promise<Uint8Array> {
   return new Uint8Array(buf);
 }
 
-/** Ask where to save. Returns a path, or null if cancelled. */
+/** Ask where to save. Returns a path (with the right extension), or null if cancelled. */
 export async function pickSavePath(suggested: string, kind: "bento" | "csv"): Promise<string | null> {
   if (isTauri) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    return (await save({ defaultPath: suggested, filters: SAVE_FILTERS[kind] })) ?? null;
+    const { invoke } = await import("@tauri-apps/api/core");
+    return (await invoke<string | null>("pick_save", { suggested, kind })) ?? null;
   }
+  if (kind === "bento" && !/\.bento$/i.test(suggested)) return suggested + ".bento";
+  if (kind === "csv" && !/\.(csv|tsv|txt)$/i.test(suggested)) return suggested + ".csv";
   return suggested;
+}
+
+/** The Rust side refused a path the user hasn't chosen (e.g. a stale recent file). */
+export function isNotAllowed(e: unknown): boolean {
+  return /isn't allowed to use that file/.test(String(e instanceof Error ? e.message : e));
+}
+
+/* --------------------------- recent files --------------------------- */
+
+const RECENT_KEY = "bento.recent";
+const localRecent = (): string[] => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]"); } catch { return []; } };
+
+/** Recent files. In the app these live in the Rust side, which only lists files the user chose. */
+export async function recentFiles(): Promise<string[]> {
+  if (!isTauri) return localRecent();
+  const { invoke } = await import("@tauri-apps/api/core");
+  let list = await invoke<string[]>("recent_files");
+  // First run after updating: bring the old list (kept in the page) across once.
+  const old = localRecent();
+  if (old.length) {
+    list = await invoke<string[]>("import_recent", { paths: old });
+    localStorage.removeItem(RECENT_KEY);
+  }
+  return list;
+}
+
+export async function noteRecent(path: string): Promise<void> {
+  if (!isTauri) {
+    localStorage.setItem(RECENT_KEY, JSON.stringify([path, ...localRecent().filter((p) => p.toLowerCase() !== path.toLowerCase())].slice(0, 8)));
+    return;
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("note_recent", { path });
+}
+
+export async function forgetRecent(path: string): Promise<void> {
+  if (!isTauri) { localStorage.setItem(RECENT_KEY, JSON.stringify(localRecent().filter((p) => p !== path))); return; }
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("forget_recent", { path });
 }
 
 export async function writeFile(path: string, bytes: Uint8Array): Promise<void> {
@@ -157,9 +191,10 @@ export async function recoveryDir(): Promise<string | null> {
   return invoke<string>("recovery_dir");
 }
 
-export async function listDir(path: string): Promise<string[]> {
+/** Names of the files in the recovery folder. */
+export async function listRecovery(): Promise<string[]> {
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<string[]>("list_dir", { path });
+  return invoke<string[]>("list_recovery");
 }
 
 export async function removeFile(path: string): Promise<void> {

@@ -156,10 +156,33 @@ export function toBool(v: Val): boolean | FErr {
   return Number.isNaN(n) ? ERR.value : n !== 0;
 }
 
+/**
+ * A number as text: up to 15 significant digits, like Excel (so exported
+ * and copied values keep their precision, while float noise such as
+ * 0.1 + 0.2 = 0.30000000000000004 still reads 0.3).
+ */
 export function formatNumber(n: number): string {
   if (!Number.isFinite(n)) return ERR.div0.code;
   if (Number.isInteger(n) && Math.abs(n) < 1e15) return String(n);
-  return String(Number(n.toPrecision(12)));
+  return String(Number(n.toPrecision(15)));
+}
+
+/** The same number with fewer significant digits, for narrow columns ("General" in Excel). */
+export function shortenNumber(text: string, fits: (s: string) => boolean): string {
+  if (fits(text)) return text;
+  const n = Number(text);
+  if (!Number.isFinite(n)) return text;
+  const intDigits = Math.max(1, Math.floor(Math.log10(Math.abs(n) || 1)) + 1);
+  for (let p = 14; p >= 1; p--) {
+    const s = String(Number(n.toPrecision(p)));
+    if (fits(s)) return s;
+    if (p <= intDigits && Math.abs(n) < 1e15) break; // never round away whole-number digits
+  }
+  for (let dp = 2; dp >= 0; dp--) {
+    const sci = n.toExponential(dp).replace("e+", "E+").replace("e-", "E-");
+    if (fits(sci)) return sci;
+  }
+  return text;
 }
 
 /** How a plain (non-formula) cell behaves when a formula reads it. */
@@ -194,7 +217,11 @@ export function compareOp(a: Val, b: Val, op: string): boolean {
   let d: number;
   const an = typeof a === "number" ? a : typeof a === "string" ? parseNum(a) : NaN;
   const bn = typeof b === "number" ? b : typeof b === "string" ? parseNum(b) : NaN;
-  if (!Number.isNaN(an) && !Number.isNaN(bn) && typeof a !== "boolean" && typeof b !== "boolean") d = an - bn;
+  if (!Number.isNaN(an) && !Number.isNaN(bn) && typeof a !== "boolean" && typeof b !== "boolean") {
+    // Numbers are compared to 15 significant digits, like Excel, so float
+    // noise doesn't decide the answer: 0.1 + 0.2 = 0.3 is TRUE.
+    d = an === bn || Number(an.toPrecision(15)) === Number(bn.toPrecision(15)) ? 0 : an - bn;
+  }
   else { const x = toStr(a).toLowerCase(); const y = toStr(b).toLowerCase(); d = x < y ? -1 : x > y ? 1 : 0; }
   switch (op) {
     case "=": return d === 0;
@@ -479,7 +506,8 @@ export function parse(src: string): Node {
       const prec = BIN_PREC[t.v];
       if (prec === undefined || prec < minPrec) break;
       p++;
-      const right = expr(t.v === "^" ? prec : prec + 1);
+      // Every operator, ^ included, works left to right (Excel: 2^3^2 = 64).
+      const right = expr(prec + 1);
       left = { k: "bin", op: t.v, a: left, b: right, s: left.s, e: right.e };
     }
     return left;

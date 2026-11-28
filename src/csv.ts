@@ -42,6 +42,34 @@ export function sniffDelimiter(text: string, filename = ""): Delimiter {
   return best;
 }
 
+/**
+ * Does the first row look like column headings? Used to freeze it when a
+ * CSV opens, so sorting and filtering leave it alone (and it's visibly
+ * different, so a wrong guess is easy to spot and unfreeze).
+ *
+ * Headings: every filled cell in row 1 is text (not a number or date), the
+ * row isn't sparse, no heading repeats, and either some column changes
+ * kind below it (text over numbers) or none of the headings recur below.
+ */
+export function looksLikeHeader(rows: string[][], isNumber: (s: string) => boolean): boolean {
+  if (rows.length < 2) return false;
+  const head = rows[0];
+  const filled = head.filter((v) => v.trim() !== "");
+  if (!filled.length || filled.length < head.length / 2) return false;
+  if (filled.some((v) => isNumber(v) || /^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}/.test(v.trim()))) return false;
+  if (new Set(filled.map((v) => v.trim().toLowerCase())).size !== filled.length) return false;
+  const body = rows.slice(1, 51);
+  // Strong sign: text on top of a column that's mostly numbers.
+  for (let c = 0; c < head.length; c++) {
+    if (!head[c]?.trim()) continue;
+    const vals = body.map((r) => r[c] ?? "").filter((v) => v.trim() !== "");
+    if (vals.length && vals.filter(isNumber).length >= vals.length * 0.8) return true;
+  }
+  // All text: a heading wouldn't normally appear again in its own column.
+  if (rows.length < 3) return false;
+  return head.every((h, c) => !h.trim() || !body.some((r) => (r[c] ?? "").trim().toLowerCase() === h.trim().toLowerCase()));
+}
+
 export function sniffLineEnding(text: string): LineEnding {
   const i = text.indexOf("\n");
   return i > 0 && text[i - 1] === "\r" ? "\r\n" : i >= 0 ? "\n" : "\r\n";

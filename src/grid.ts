@@ -1,11 +1,11 @@
-import { isMac } from "./platform";
+import { cmdKey, isAltGr, isMac } from "./platform";
 import { fromTSV, toTSV } from "./csv";
 import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, allRects, selRect } from "./doc";
 import { Engine, offsetFormula } from "./formula";
-import { tokenize, type Tok } from "./fcore";
+import { shortenNumber, tokenize, type Tok } from "./fcore";
 import { fillValues } from "./fill";
 import { DEFAULT_FONT, DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
-import { clamp, colName, parseNum } from "./util";
+import { clamp, colName, maxOf, parseNum, pushAll } from "./util";
 
 const BASE_ROW_H = 22;
 const BASE_HEAD_H = 24;
@@ -42,13 +42,15 @@ export interface GridHooks {
   onDropdown?(r: number, c: number, x: number, y: number): void;
   /** An image on the clipboard was pasted. */
   onPasteImage?(file: File): void;
+  /** Paste values only, read straight from the clipboard (when no paste event came). */
+  onPasteValues?(): void;
 }
 
 type Drag =
   | { kind: "cells" }
   | { kind: "cols" }
   | { kind: "rows" }
-  | { kind: "resize"; col: number; startX: number; startW: number }
+  | { kind: "resize"; col: number; startX: number; startW: number; before: Map<number, number> }
   | { kind: "fill"; src: Rect }
   | { kind: "move"; src: Rect; grabR: number; grabC: number }
   | { kind: "freezeRows" }
@@ -75,7 +77,11 @@ interface Reorder {
 interface Editing { r: number; c: number; mode: "replace" | "edit" }
 
 /** Internal clipboard: lets formulas survive copy/paste inside Bento. */
-let lastCopy: { tsv: string; raw: string[][]; values: string[][]; styles: Style[][]; rows: number[]; c: number; widths?: number[]; heights?: (number | undefined)[] } | null = null;
+let lastCopy: {
+  tsv: string; raw: string[][]; values: string[][]; styles: Style[][]; rows: number[]; c: number; widths?: number[]; heights?: (number | undefined)[];
+  /** Set by Cut: the cells move when pasted (if nothing on the sheet changed in between). */
+  cut?: { doc: Doc; version: number; rect: Rect };
+} | null = null;
 
 export type PasteMode = "normal" | "values" | "format" | "plain" | "transpose";
 
@@ -147,6 +153,7 @@ const REF_COLORS = ["#4f86c6", "#d97757", "#6c8c55", "#9b7bb8", "#c9922e", "#3d9
 export class Grid {
   doc: Doc | null = null;
   private pasteValuesNext = false;
+  private pasteValuesTimer = 0;
   /** Gridline strength, 0–1 (Preferences). */
   gridAlpha = prefNumber("bento.gridOpacity", 100) / 100;
   /** Where Enter moves after typing (Preferences). */
@@ -181,7 +188,7 @@ export class Grid {
   private hoverFreeze: "freezeRows" | "freezeCols" | null = null;
   private editorWraps = false;
   /** When set, cells whose text matches are highlighted (find). */
-  matcher: ((s: string) => boolean) | null = null;
+  matcher: ((shown: string, raw: string) => boolean) | null = null;
   /** Zoom factor (1 = 100%). Column widths are stored unzoomed. */
   zoom = 1;
 
@@ -818,6 +825,26 @@ export class Grid {
       ctx.restore();
     }
     this.drawFillHandle(main);
+    this.drawCutOutline();
+  }
+
+  /** Dashed outline round cells that have been cut (until pasted, Esc, or a change). */
+  private drawCutOutline() {
+    const d = this.doc, cut = lastCopy?.cut;
+    if (!d || !cut || cut.doc !== d) return;
+    if (cut.version !== d.version) { lastCopy!.cut = undefined; return; }
+    const r = cut.rect, ctx = this.ctx;
+    const x0 = this.colLeft(r.c0), x1 = this.colLeft(r.c1) + this.cw(r.c1);
+    const y0 = this.rowTop(r.r0), y1 = this.rowTop(r.r1) + this.rowH(r.r1);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(this.rowHeaderWidth(), this.hh, this.w, this.h);
+    ctx.clip();
+    ctx.strokeStyle = this.colors.accent;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 3]);
+    ctx.strokeRect(Math.round(x0) + 0.75, Math.round(y0) + 0.75, Math.round(x1 - x0) - 1.5, Math.round(y1 - y0) - 1.5);
+    ctx.restore();
   }
 
   private drawCells(r0: number, r1: number, c0: number, c1: number, sel: Rect, frozen: boolean) {
@@ -867,7 +894,7 @@ export class Grid {
         if (dr >= d.rows.length) break;
         for (let c = c0; c <= c1; c++) {
           if (covered.has(r * 65536 + c) || !this.cw(c)) continue;
-          if (this.matcher(d.display(dr, c))) { const b = boxOf(r, c, mergeOf(r, c)); ctx.fillRect(b.x, b.y, b.w, b.h); }
+          if (this.matcher(d.display(dr, c), d.raw(dr, c))) { const b = boxOf(r, c, mergeOf(r, c)); ctx.fillRect(b.x, b.y, b.w, b.h); }
         }
       }
     }
@@ -908,7 +935,9 @@ export class Grid {
       const st = d.rowStyleArray(dr);
       const s = st && st[c] ? d.styles[st[c]] : NO_STYLE;
       if (s.check || s.list || s.img) return; // drawn as widgets below
-      const { text: full, err, numeric } = this.cellText(dr, c, raw, s);
+      const shown = this.cellText(dr, c, raw, s);
+      let full = shown.text;
+      const { err, numeric } = shown;
       const header = r === 0 && d.frozenRows > 0;
       const ha = s.ha ?? (numeric && !header ? "r" : "l");
       const va = s.va ?? "b";
@@ -935,6 +964,11 @@ export class Grid {
         return;
       }
 
+      // A calculated number wider than its column is rounded to fit, as in
+      // Excel's General format, instead of being cut off mid-digits.
+      if (numeric && !s.nf && wrap !== "wrap" && !s.rot && raw.charCodeAt(0) === 61 && /^-?\d*\.\d+$/.test(full)) {
+        full = shortenNumber(full, (t) => ctx.measureText(t).width <= cw - pad * 2);
+      }
       let lines: string[];
       if (s.rot === "stack") lines = [...full.replace(/\n/g, " ")];
       else if (wrap === "wrap") lines = this.wrapLines(full, cw - pad * 2);
@@ -985,6 +1019,23 @@ export class Grid {
       for (let c = c0; c <= Math.min(c1, len - 1); c++) if (!covered.has(r * 65536 + c)) drawText(r, c);
     }
     for (const [r, c] of anchors) drawText(r, c);
+    // Long text from a cell scrolled off to the left can still run into view:
+    // draw the nearest filled cell to the left of each row (if it overflows,
+    // drawText carries it across the empty cells; if not, it's clipped away).
+    if (c0 > this.fc) {
+      const lo = Math.max(this.fc, c0 - 60);
+      for (let r = r0; r <= r1; r++) {
+        const dr = d.dataRow(r);
+        if (dr >= d.rows.length) break;
+        const row = d.rows[dr];
+        if (row[c0]) continue; // the first visible cell is filled: nothing can run into it
+        for (let cc = Math.min(c0 - 1, row.length - 1); cc >= lo; cc--) {
+          if (!row[cc]) continue;
+          if (!covered.has(r * 65536 + cc) && !this.mergeAt(r, cc)) drawText(r, cc);
+          break;
+        }
+      }
+    }
     // Values spilled from dynamic-array formulas (FILTER, SORT, SEQUENCE…).
     for (const sp of d.engine.spillRects()) {
       for (let i = 0; i < sp.h; i++) {
@@ -1199,7 +1250,7 @@ export class Grid {
   toggleChecks(cells?: { r: number; c: number }[]) {
     const d = this.doc!;
     const list: { r: number; c: number }[] = [];
-    if (cells) list.push(...cells.map(({ r, c }) => ({ r: d.dataRow(r), c })));
+    if (cells) pushAll(list, cells.map(({ r, c }) => ({ r: d.dataRow(r), c })));
     else for (const rect of allRects(d.sel)) for (let r = rect.r0; r <= Math.min(rect.r1, this.lastRow() + 1000); r++) {
       const dr = d.dataRow(r);
       if (dr >= d.rows.length) break;
@@ -1585,8 +1636,7 @@ export class Grid {
         let a = cc, b = cc;
         while (a > 0 && d.hidden.has(a - 1)) a--;
         while (d.hidden.has(b + 1)) b++;
-        for (let i = a; i <= b; i++) d.hidden.delete(i);
-        d.version++;
+        d.setColumnsHidden(Array.from({ length: b - a + 1 }, (_, k) => a + k), false);
         this.invalidate();
         this.hooks.onChange();
         return true;
@@ -1744,8 +1794,10 @@ export class Grid {
     for (let r = 0; r < Math.min(n, 3000); r++) sample(r);
     const first = this.rowAtBody(this.sy);
     for (let r = first; r < first + 80; r++) { const dr = d.dataRow(r); if (dr < n) sample(dr); }
+    const before = new Map(d.widths);
     d.widths.set(c, clamp(Math.ceil(max + BASE_PAD * 2 + 4), 44, 640));
     d.remeasureAll();
+    d.commitWidths(before, "Fit column");
     this.invalidate();
     this.hooks.onChange();
   }
@@ -2316,7 +2368,7 @@ export class Grid {
     if (d.sel.extra?.length) { this.hooks.onNotice?.("Copying more than one range at a time isn't supported"); return null; }
     const s = selRect(d.sel);
     const cells = (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
-    if (cells > 5_000_000) return null;
+    if (cells > 5_000_000) { this.hooks.onNotice?.("That selection is too big to copy (over 5 million cells)"); return null; }
     const raw: string[][] = [];
     const values: string[][] = [];
     const shown: string[][] = [];
@@ -2345,7 +2397,8 @@ export class Grid {
     // Whole columns/rows bring their size along when pasted onto whole columns/rows.
     if (this.isWholeCols(s) && !this.isWholeRows(s)) lastCopy.widths = Array.from({ length: s.c1 - s.c0 + 1 }, (_, j) => d.width(s.c0 + j));
     if (this.isWholeRows(s) && !this.isWholeCols(s)) lastCopy.heights = rows.map((r) => d.manualHeight(r));
-    if (cut) this.clear("Cut");
+    // Like Excel and Sheets, cut cells stay put (outlined) until pasted.
+    if (cut) { lastCopy.cut = { doc: d, version: d.version, rect: s }; this.invalidate(); }
     return tsv;
   }
 
@@ -2353,11 +2406,13 @@ export class Grid {
     const d = this.doc;
     if (!d) return;
     let internal = lastCopy && lastCopy.tsv === text ? lastCopy : null;
+    // A cut that's still current moves the cells (only a plain paste can).
+    const cut = internal?.cut && internal.cut.doc === d && internal.cut.version === d.version && mode === "normal" ? internal : null;
     if (mode === "format" && !internal) { this.hooks.onNotice?.("Formatting can only be pasted from cells copied in Bento"); return; }
     let block = internal ? (mode === "values" ? internal.values : internal.raw) : fromTSV(text);
     let styles = internal?.styles;
     if (mode === "transpose") {
-      const t = <T,>(m: T[][], blank: T) => { const w = Math.max(...m.map((r) => r.length)); return Array.from({ length: w }, (_, j) => m.map((r) => r[j] ?? blank)); };
+      const t = <T,>(m: T[][], blank: T) => { const w = maxOf(m.map((r) => r.length), 0); return Array.from({ length: w }, (_, j) => m.map((r) => r[j] ?? blank)); };
       block = t(block, "");
       if (styles) styles = t(styles, {} as Style);
       // Formulas would point the wrong way once flipped: keep them only from outside.
@@ -2368,7 +2423,7 @@ export class Grid {
     const keepValues = mode !== "format";
     const s = selRect(d.sel);
     const bh = block.length;
-    const bw = Math.max(...block.map((r) => r.length));
+    const bw = maxOf(block.map((r) => r.length), 0);
     // A single copied value pasted onto a bigger selection fills it.
     const fill = bh === 1 && bw === 1 && (s.r1 > s.r0 || s.c1 > s.c0);
     const h = fill ? s.r1 - s.r0 + 1 : bh;
@@ -2380,7 +2435,7 @@ export class Grid {
       const dr = d.dataRow(disp);
       for (let j = 0; j < w; j++) {
         let v = fill ? block[0][0] : block[i][j] ?? "";
-        if (internal && mode !== "values" && mode !== "transpose") {
+        if (internal && mode !== "values" && mode !== "transpose" && !cut) {
           const srcR = internal.rows[fill ? 0 : i];
           const srcC = internal.c + (fill ? 0 : j);
           v = offsetFormula(v, dr - srcR, s.c0 + j - srcC);
@@ -2395,11 +2450,20 @@ export class Grid {
       }
     }
     const after: Sel = { ar: s.r0, ac: s.c0, fr: s.r0 + h - 1, fc: s.c0 + w - 1 };
-    d.setCells(cells, mode === "normal" ? "Paste" : "Paste special", after);
+    if (cut) {
+      // Empty the cut cells first (except where the paste lands), all in one undo step.
+      const landing = new Set(cells.map((x) => x.r * 65536 + x.c));
+      const clears: CellSet[] = [];
+      cut.rows.forEach((r) => { for (let j = 0; j < (cut.raw[0]?.length ?? 0); j++) if (!landing.has(r * 65536 + cut.c + j)) clears.push({ r, c: cut.c + j, v: "", style: 0 }); });
+      d.setCells([...clears, ...cells], "Move cells", after);
+      lastCopy = null; // as in Excel, a cut pastes once
+    } else d.setCells(cells, mode === "normal" ? "Paste" : "Paste special", after);
     if (internal && (mode === "normal" || mode === "format")) {
       if (internal.widths && this.isWholeCols(s)) {
+        const before = new Map(d.widths);
         internal.widths.forEach((w, j) => d.widths.set(s.c0 + j, w));
         d.remeasureAll();
+        d.commitWidths(before, "Paste column widths");
       }
       if (internal.heights && this.isWholeRows(s)) {
         const byH = new Map<number | null, number[]>();
@@ -2513,8 +2577,8 @@ export class Grid {
   /** Keyboard handling while the grid (not the editor) has focus. */
   private onSinkKey(e: KeyboardEvent) {
     const d = this.doc;
-    if (!d || d.loading !== null) return;
-    const ctrl = e.ctrlKey || e.metaKey;
+    if (!d || d.loading !== null || isAltGr(e)) return; // AltGr is typing (\ [ ] @ €…)
+    const ctrl = cmdKey(e);
     const sh = e.shiftKey;
     const s = d.sel;
     let handled = true;
@@ -2540,7 +2604,12 @@ export class Grid {
       }
       case "Delete":
       case "Backspace": this.clear(); break;
-      case "Escape": this.matcher = null; this.invalidate(); handled = false; break;
+      case "Escape":
+        this.matcher = null;
+        if (lastCopy?.cut) lastCopy.cut = undefined; // Esc cancels a cut
+        this.invalidate();
+        handled = false;
+        break;
       case " ":
         // Space ticks the selection's checkboxes.
         handled = !ctrl && !sh && !e.altKey && d.style(d.dataRow(s.ar), s.ac).check === true && this.toggleChecks();
@@ -2682,7 +2751,7 @@ export class Grid {
       }
       const rc = this.resizeColAt(x, y);
       if (rc >= 0) {
-        this.drag = { kind: "resize", col: rc, startX: x, startW: d.width(rc) };
+        this.drag = { kind: "resize", col: rc, startX: x, startW: d.width(rc), before: new Map(d.widths) };
         sc.setPointerCapture(e.pointerId);
         return;
       }
@@ -2750,7 +2819,7 @@ export class Grid {
         requestAnimationFrame(() => { if (!this.drag) this.hoverCursor(p.x, p.y); });
       }
       if (drag?.kind === "reorder") this.endReorder(drag, e.type === "pointerup");
-      if (drag?.kind === "resize") { this.doc?.remeasureAll(); this.hooks.onChange(); }
+      if (drag?.kind === "resize" && this.doc) { this.doc.remeasureAll(); this.doc.commitWidths(drag.before, "Resize column"); this.hooks.onChange(); }
       if (drag?.kind === "move") {
         const t = this.moveTarget;
         this.moveTarget = null;
@@ -2819,26 +2888,41 @@ export class Grid {
       // IME input: hand over to the real editor straight away.
       this.startEdit("replace", "");
     });
+    // (If copy() refuses, it has said why; keep the browser from copying the empty sink instead.)
     this.sink.addEventListener("copy", (e) => {
       const t = this.copy();
-      if (t !== null) { e.clipboardData?.setData("text/plain", t); e.preventDefault(); }
+      e.preventDefault();
+      if (t !== null) e.clipboardData?.setData("text/plain", t);
     });
     this.sink.addEventListener("cut", (e) => {
       const t = this.copy(true);
-      if (t !== null) { e.clipboardData?.setData("text/plain", t); e.preventDefault(); }
+      e.preventDefault();
+      if (t !== null) e.clipboardData?.setData("text/plain", t);
     });
     this.sink.addEventListener("paste", (e) => {
       e.preventDefault();
       const pic = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
-      if (pic && this.hooks.onPasteImage) { this.hooks.onPasteImage(pic); return; }
-      const t = e.clipboardData?.getData("text/plain");
       const mode = this.pasteValuesNext ? "values" : "normal";
       this.pasteValuesNext = false;
+      clearTimeout(this.pasteValuesTimer);
+      if (pic && this.hooks.onPasteImage) { this.hooks.onPasteImage(pic); return; }
+      const t = e.clipboardData?.getData("text/plain");
       if (t) this.paste(t, mode);
     });
-    // Ctrl+Shift+V: the browser still fires "paste"; remember to drop formulas and formatting.
+    // Ctrl+Shift+V: the browser still fires "paste"; remember to drop formulas
+    // and formatting — but only for that paste. If no paste follows (an empty
+    // clipboard, or a Mac, where ⌘⇧V isn't a paste), ask the clipboard directly
+    // instead of leaving the flag set for the next ordinary paste.
     this.sink.addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "v") this.pasteValuesNext = true;
+      if (cmdKey(e) && e.shiftKey && e.key.toLowerCase() === "v") {
+        this.pasteValuesNext = true;
+        clearTimeout(this.pasteValuesTimer);
+        this.pasteValuesTimer = window.setTimeout(() => {
+          if (!this.pasteValuesNext) return;
+          this.pasteValuesNext = false;
+          this.hooks.onPasteValues?.();
+        }, 250);
+      }
     }, true);
 
     this.editor.addEventListener("keydown", (e) => this.onEditorKey(e));

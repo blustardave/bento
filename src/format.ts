@@ -238,7 +238,8 @@ function duskColor(hue: Hue, tone: string | undefined): string {
 /** Turn a stored colour into a real one for the current theme. */
 export function resolveColor(c: string | undefined, theme: Theme): string | null {
   if (!c) return null;
-  if (c[0] !== "@") return c;
+  // Only real hex colours pass through: these strings end up in the page.
+  if (c[0] !== "@") return /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(c) ? c : null;
   const [hue, tone] = c.slice(1).split("-") as [Hue, string | undefined];
   if (theme === "dusk") return TEXT[hue] ? duskColor(hue, tone) : null;
   const table = tone === "2" ? FILL_STRONG : tone === "1" ? FILL_SOFT : TEXT;

@@ -11,6 +11,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      releaseId: ${{ steps.release.outputs.releaseId }}
     steps:
       - uses: actions/checkout@v5
 
@@ -52,7 +54,15 @@ jobs:
 
       - run: npm test
 
+      # The Rust side's tests (which files the page may read and write).
+      - name: Rust tests
+        shell: bash
+        run: npm run build && cargo test --manifest-path src-tauri/Cargo.toml
+
+      # The release starts as a draft: users only see it (and the updater only
+      # offers it) once the Mac job has added its files and published it.
       - uses: tauri-apps/tauri-action@v0
+        id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -68,7 +78,7 @@ jobs:
             **Already have Bento?** You don't need to download anything — it updates itself. Look for "Update ready" in the title bar.
 
             Built from commit ${{ github.sha }}.
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
 
@@ -104,17 +114,23 @@ jobs:
 
       - run: npm ci
 
+      - run: npm test
+
       # Adds the Mac files (and the Mac entries in latest.json) to the
-      # release the Windows job just made.
+      # draft release the Windows job just made…
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
-          tagName: build-${{ github.run_number }}
-          releaseName: "Bento 0.1.${{ github.run_number }}"
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ needs.build.outputs.releaseId }}
           includeUpdaterJson: true
           args: --target universal-apple-darwin
+
+      # …then publishes it, so both platforms go live together. If anything
+      # above failed, the release stays a draft and no one is offered it.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X PATCH "repos/${{ github.repository }}/releases/${{ needs.build.outputs.releaseId }}" -F draft=false

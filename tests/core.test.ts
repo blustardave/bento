@@ -34,7 +34,7 @@ const e = new Engine({ raw:(r,c)=>g[r]?.[c] ?? "", rowCount:()=>g.length });
 const d = (r:number,c:number)=>e.display(r,c);
 eq([d(0,2), d(1,2), d(2,0), d(2,2)], ["3","6","6","pos"], "formulas 1");
 eq([d(3,0), d(3,1), d(3,2)], ["#CIRC!","#DIV/0!","a1TRUE"], "formulas 2");
-eq([d(4,0), d(4,1), d(4,2)], ["2.35","512","4"], "formulas 3");
+eq([d(4,0), d(4,1), d(4,2)], ["2.35","64","4"], "formulas 3 (^ is left to right, as in Excel)");
 eq([d(5,0), d(5,1), d(5,2)], ["0.4","FALSE","5"], "formulas 4");
 eq([d(6,0), d(6,1), d(6,2)], ["FALSE","3!","#NAME?"], "formulas 5 nested IF");
 eq(d(2,1), "#CIRC!", "errors propagate through ranges");

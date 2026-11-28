@@ -146,10 +146,9 @@ export function nameProblem(book: Book, name: string, except?: string): string |
   return null;
 }
 
-export function defineName(book: Book, name: string, ref: string) {
-  book.names.set(name.toUpperCase(), { name, ref });
-  book.structureDirty = true;
-  book.recalcAll();
+/** Add a defined name, as an undo step on the current sheet. */
+export function defineName(doc: Doc, name: string, ref: string) {
+  doc.changeNames((names) => names.set(name.toUpperCase(), { name, ref }));
 }
 
 export function namesDialog(doc: Doc, selectionRef: string, onDone: () => void, goTo: (ref: string) => void) {
@@ -173,15 +172,15 @@ export function namesDialog(doc: Doc, selectionRef: string, onDone: () => void, 
         const p = nameProblem(book, nn, n.name);
         if (p) { toast(p, true); name.value = n.name; return; }
         if (!Engine.references("=" + rr).length && !/^[A-Za-z_]/.test(rr)) { toast("That doesn't look like a range", true); ref.value = n.ref; return; }
-        book.names.delete(n.name.toUpperCase());
-        defineName(book, nn, rr);
+        // Formulas using the old name follow the new one.
+        doc.renameName(n.name, nn, rr);
         onDone();
         paint();
       };
       name.addEventListener("change", save);
       ref.addEventListener("change", save);
       go.addEventListener("click", () => { finish(); goTo(n.ref); });
-      del.addEventListener("click", () => { book.names.delete(n.name.toUpperCase()); book.structureDirty = true; book.recalcAll(); onDone(); paint(); });
+      del.addEventListener("click", () => { doc.changeNames((names) => names.delete(n.name.toUpperCase()), "Delete name"); onDone(); paint(); });
       list.append(el("div", { class: "names-row" }, name, ref, go, del));
     }
   };
@@ -192,7 +191,7 @@ export function namesDialog(doc: Doc, selectionRef: string, onDone: () => void, 
     const nn = newName.value.trim();
     const p = nameProblem(book, nn);
     if (p) { toast(p, true); newName.focus(); return; }
-    defineName(book, nn, newRef.value.trim().replace(/^=/, ""));
+    defineName(doc, nn, newRef.value.trim().replace(/^=/, ""));
     newName.value = "";
     onDone();
     paint();

@@ -6,7 +6,7 @@
  * `alt` is the Ctrl key: it flips between "continue the series" and "copy".
  */
 import { DateFmt, formatDate, parseDate } from "./format";
-import { parseNum } from "./util";
+import { maxOf, parseNum } from "./util";
 
 type Kind =
   | { t: "num"; n: number; dp: number }
@@ -94,7 +94,7 @@ export function fillValues(src: string[], count: number, backward: boolean, alt 
   if (same("num")) {
     const ks = kinds as Extract<Kind, { t: "num" }>[];
     const [a, b] = fit(ks.map((k) => k.n));
-    const dp = Math.max(...ks.map((k) => k.dp));
+    const dp = maxOf(ks.map((k) => k.dp), 0);
     return Array.from({ length: count }, (_, k) => String(round(a + b * idx(k), dp + (n > 2 ? 4 : 0))));
   }
   if (same("date")) {

@@ -87,3 +87,23 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 }
 
 export const nextFrame = () => new Promise<void>((r) => setTimeout(r, 0));
+
+/**
+ * Largest / smallest of a list. (Math.max(...list) throws once a list
+ * passes ~120k items, which a big selection easily does.)
+ */
+export function maxOf(list: Iterable<number>, empty = -Infinity): number {
+  let m = -Infinity, any = false;
+  for (const v of list) { any = true; if (v > m) m = v; }
+  return any ? m : empty;
+}
+export function minOf(list: Iterable<number>, empty = Infinity): number {
+  let m = Infinity, any = false;
+  for (const v of list) { any = true; if (v < m) m = v; }
+  return any ? m : empty;
+}
+/** Append every item (safe for huge lists, unlike push(...items)). */
+export function pushAll<T>(to: T[], items: readonly T[]): T[] {
+  for (let i = 0; i < items.length; i++) to.push(items[i]);
+  return to;
+}

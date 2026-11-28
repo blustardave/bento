@@ -182,7 +182,7 @@ export function showMenu(items: MenuItem[], x: number, y: number, onClose?: () =
   openMenu = { close };
 }
 
-export interface ModalButton<T> { label: string; value: T; primary?: boolean }
+export interface ModalButton<T> { label: string; value: T; primary?: boolean; danger?: boolean }
 
 /** A small dialog. Resolves with the chosen button's value, or null on Escape. */
 export function modal<T>(title: string, message: string, buttons: ModalButton<T>[]): Promise<T | null> {
@@ -194,7 +194,7 @@ export function modal<T>(title: string, message: string, buttons: ModalButton<T>
     const scrim = el("div", { class: "scrim" }, box);
     let primary: HTMLButtonElement | null = null;
     for (const b of buttons) {
-      const btn = el("button", { class: "btn" + (b.primary ? " primary" : ""), text: b.label });
+      const btn = el("button", { class: "btn" + (b.primary ? " primary" : "") + (b.danger ? " danger-text" : ""), text: b.label });
       btn.addEventListener("click", () => done(b.value));
       if (b.primary) primary = btn;
       foot.append(btn);
