@@ -233,10 +233,13 @@ export function textFormat(v: Val, f: string): string {
     const dp = dec.length;
     const minDp = (dec.match(/0/g) ?? []).length;
     const grouped = code.includes(",");
-    body = new Intl.NumberFormat("en-GB", { useGrouping: grouped, minimumFractionDigits: minDp, maximumFractionDigits: dp }).format(Math.abs(v));
-    const intZeros = (code.split(".")[0].match(/0/g) ?? []).length;
+    // "000" pads to three digits (TEXT(42,"000") = 042), as in Excel.
+    const intZeros = (code.replace("%", "").split(".")[0].match(/0/g) ?? []).length;
+    body = new Intl.NumberFormat("en-GB", { useGrouping: grouped, minimumIntegerDigits: Math.min(21, Math.max(1, intZeros)), minimumFractionDigits: minDp, maximumFractionDigits: dp }).format(Math.abs(v));
     if (intZeros === 0 && body.startsWith("0") && dp > 0) body = body.slice(1);
     if (v < 0 && neg === undefined) body = "-" + body;
+    // The % was part of the matched code, so it has to be put back.
+    if (code.endsWith("%")) body += "%";
   }
   return lit.slice(0, m.index).replace(/\u0001/g, "") + body + lit.slice(m.index + code.length).replace(/\u0001/g, "");
 }

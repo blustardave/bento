@@ -2,7 +2,7 @@ import { cmdKey, isAltGr, isMac } from "./platform";
 import { fromTSV, toTSV } from "./csv";
 import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, allRects, selRect } from "./doc";
 import { Engine, offsetFormula } from "./formula";
-import { tokenize, type Tok } from "./fcore";
+import { shortenNumber, tokenize, type Tok } from "./fcore";
 import { fillValues } from "./fill";
 import { DEFAULT_FONT, DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
 import { clamp, colName, maxOf, parseNum, pushAll } from "./util";
@@ -911,7 +911,9 @@ export class Grid {
       const st = d.rowStyleArray(dr);
       const s = st && st[c] ? d.styles[st[c]] : NO_STYLE;
       if (s.check || s.list || s.img) return; // drawn as widgets below
-      const { text: full, err, numeric } = this.cellText(dr, c, raw, s);
+      const shown = this.cellText(dr, c, raw, s);
+      let full = shown.text;
+      const { err, numeric } = shown;
       const header = r === 0 && d.frozenRows > 0;
       const ha = s.ha ?? (numeric && !header ? "r" : "l");
       const va = s.va ?? "b";
@@ -938,6 +940,11 @@ export class Grid {
         return;
       }
 
+      // A calculated number wider than its column is rounded to fit, as in
+      // Excel's General format, instead of being cut off mid-digits.
+      if (numeric && !s.nf && wrap !== "wrap" && !s.rot && raw.charCodeAt(0) === 61 && /^-?\d*\.\d+$/.test(full)) {
+        full = shortenNumber(full, (t) => ctx.measureText(t).width <= cw - pad * 2);
+      }
       let lines: string[];
       if (s.rot === "stack") lines = [...full.replace(/\n/g, " ")];
       else if (wrap === "wrap") lines = this.wrapLines(full, cw - pad * 2);

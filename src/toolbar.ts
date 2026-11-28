@@ -38,6 +38,7 @@ export const ICONS = {
   decDown: '<circle cx="2.6" cy="9" r="1.05" style="fill:currentColor;stroke:none"/><ellipse cx="7" cy="6" rx="2.25" ry="3.4"/><path d="M14 13.25H8.5M10.25 11.5 8.5 13.25 10.25 15"/>',
   decUp: '<circle cx="1.6" cy="9" r="1.05" style="fill:currentColor;stroke:none"/><ellipse cx="5.25" cy="6" rx="2" ry="3.4"/><ellipse cx="10.75" cy="6" rx="2" ry="3.4"/><path d="M7.5 13.25H13M11.25 11.5 13 13.25 11.25 15"/>',
   bold: '<path d="M4.75 2.75h4a2.5 2.5 0 0 1 0 5h-4Zm0 5h4.75a2.75 2.75 0 0 1 0 5.5H4.75Z" style="stroke-width:2"/>',
+  underline: '<path d="M4.5 2.75v4.75a3.5 3.5 0 0 0 7 0V2.75M3.5 13.75h9" style="stroke-width:1.6"/>',
   italic: '<path d="M7 2.75h5.5M3.5 13.25H9M9.75 2.75 6.25 13.25" style="stroke-width:1.6"/>',
   strike: '<path d="M2.5 8.25h11"/><path d="M11.1 4.6C10.6 3.4 9.4 2.75 8 2.75c-1.9 0-3.25 1-3.25 2.55 0 .9.45 1.55 1.2 2"/><path d="M10.65 10c.4.4.6.9.6 1.45 0 1.6-1.45 2.55-3.25 2.55-1.65 0-2.9-.65-3.4-1.9"/>',
   arrowL: '<path d="M12 8.5H4.5M6.75 6.25 4.5 8.5l2.25 2.25"/>',
