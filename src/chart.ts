@@ -148,7 +148,10 @@ function legend(series: string[], box: Box, out: string[]): number {
 }
 
 /** Draw a chart as an SVG string sized w × h. */
-export function chartSvg(type: ChartType, data: ChartData | null, w: number, h: number, title?: string): string {
+export function chartSvg(type: ChartType, data: ChartData | null, width: number, height: number, title?: string): string {
+  // Sizes go into the markup, so make sure they really are numbers.
+  const w = Math.max(16, Number(width) || 0), h = Math.max(16, Number(height) || 0);
+  if (typeof title !== "string") title = undefined;
   const out: string[] = [];
   const pad = 14;
   let top = pad;

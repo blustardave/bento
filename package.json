@@ -8,19 +8,19 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "esbuild tests/core.test.ts --bundle --platform=node --outfile=node_modules/.cache/core.test.cjs --log-level=warning && node --max-old-space-size=4096 node_modules/.cache/core.test.cjs && esbuild tests/formula.test.ts --bundle --platform=node --outfile=node_modules/.cache/formula.test.cjs --log-level=warning && node node_modules/.cache/formula.test.cjs"
+    "test": "node scripts/test.mjs"
   },
   "dependencies": {
     "@fontsource/source-serif-4": "^5.3.1",
     "@formulajs/formulajs": "^4.6.1",
     "@tauri-apps/api": "^2.1.0",
-    "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-updater": "^2.14.1",
     "@tauri-apps/plugin-window-state": "^2.5.0",
     "jstat": "^1.9.6"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",
+    "esbuild": "^0.25.12",
     "typescript": "^5.6.0",
     "vite": "^6.0.0"
   }

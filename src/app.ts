@@ -11,8 +11,8 @@ import { validName } from "./fcore";
 import { ACCENTS, applyAccent } from "./accent";
 import { decodeBento, encodeBento, isBentoPath, looksLikeBento, sheetFromData, sheetToData } from "./bento";
 import {
-  FileRef, isTauri, launchFiles, onFileDrop, onOpenFiles, pickFiles, pickSavePath, readFile,
-  windowControls, writeFile,
+  FileRef, forgetRecent, isNotAllowed, isTauri, launchFiles, noteRecent, onFileDrop, onOpenFiles, pickFiles, pickSavePath, readFile,
+  recentFiles, windowControls, writeFile,
 } from "./native";
 import { MenuItem, closeMenus, formDialog, modal, showMenu, toast } from "./ui";
 import { ToolButton, divider, grow, toolButton } from "./toolbar";
@@ -95,6 +95,7 @@ export class App {
   }
 
   private async startup() {
+    await this.loadRecent();
     await this.autosaver.start();
     this.offerRecovery();
     onFileDrop(
@@ -359,24 +360,25 @@ export class App {
       const suggested = (doc.path ?? doc.name).replace(/\.[^.\\/]+$/, "") + ".bento";
       path = await pickSavePath(suggested, "bento");
       if (!path) return false;
-      if (!isBentoPath(path)) path += ".bento";
     }
     try {
       await writeFile(path, await encodeBento(doc.book));
-      doc.path = path;
-      doc.name = basename(path);
-      if (isTauri) doc.source = { name: doc.name, path };
-      doc.book.markSaved();
-      this.autosaver.discard(doc.book.id);
-      this.autosaver.settled(doc.book);
-      this.addRecent(path);
-      this.render();
-      toast(`Saved ${doc.name}`);
-      return true;
     } catch (e) {
+      // A file from an earlier session that Bento may no longer write to: ask where instead.
+      if (isNotAllowed(e) && !saveAs) return this.save(doc, true);
       toast(String(e instanceof Error ? e.message : e), true);
       return false;
     }
+    doc.path = path;
+    doc.name = basename(path);
+    if (isTauri) doc.source = { name: doc.name, path };
+    doc.book.markSaved();
+    this.autosaver.discard(doc.book.id);
+    this.autosaver.settled(doc.book);
+    this.addRecent(path);
+    this.render();
+    toast(`Saved ${doc.name}`);
+    return true;
   }
 
   /**
@@ -393,9 +395,8 @@ export class App {
     if (opts.formulas) doc.saveFormulasAs = opts.formulas;
     const base = (doc.path ?? doc.name).replace(/\.[^.\\/]+$/, "");
     const sheetPart = doc.book.sheets.length > 1 ? ` - ${doc.sheetName}` : "";
-    let path = await pickSavePath(base + sheetPart + (doc.delim === "\t" ? ".tsv" : ".csv"), "csv");
+    const path = await pickSavePath(base + sheetPart + (doc.delim === "\t" ? ".tsv" : ".csv"), "csv");
     if (!path) return false;
-    if (!/\.(csv|tsv|txt)$/i.test(path)) path += ".csv";
     try {
       const text = doc.toText(doc.saveFormulasAs !== "formulas");
       await writeFile(path, encodeText(text, doc.encoding, doc.bom));
@@ -735,19 +736,28 @@ export class App {
 
   /* -------------------------------- recent -------------------------------- */
 
+  /** Recent files, most recent first (kept by the Rust side in the app). */
+  private recentList: string[] = [];
+
   private recent(): string[] {
-    try { return JSON.parse(localStorage.getItem("bento.recent") ?? "[]"); } catch { return []; }
+    return this.recentList;
+  }
+
+  private async loadRecent() {
+    try { this.recentList = await recentFiles(); } catch (e) { console.warn(e); }
+    if (!this.docs.length) this.render();
   }
 
   private addRecent(path: string | null) {
     if (!path) return;
-    const list = [path, ...this.recent().filter((p) => p.toLowerCase() !== path.toLowerCase())].slice(0, 8);
-    localStorage.setItem("bento.recent", JSON.stringify(list));
+    this.recentList = [path, ...this.recentList.filter((p) => p.toLowerCase() !== path.toLowerCase())].slice(0, 8);
+    noteRecent(path).catch((e) => console.warn(e));
   }
 
   private forget(path: string | null) {
     if (!path) return;
-    localStorage.setItem("bento.recent", JSON.stringify(this.recent().filter((p) => p !== path)));
+    this.recentList = this.recentList.filter((p) => p !== path);
+    forgetRecent(path).catch((e) => console.warn(e));
   }
 
   /* ------------------------------- rendering ------------------------------- */

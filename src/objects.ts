@@ -32,22 +32,31 @@ export const SHAPES: { shape: ShapeType; label: string; icon: string }[] = [
   { shape: "arrow", label: "Arrow", icon: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M2.5 6.25h6.5V3.5L13.5 8 9 12.5V9.75H2.5Z"/></svg>' },
 ];
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** An SVG element built with the DOM (never from markup strings: file data goes in here). */
+function svgEl(tag: string, attrs: Record<string, string | number>): SVGElement {
+  const e = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
+  return e;
+}
+
 /** The outline of a shape in a w × h box. */
-function shapePath(shape: ShapeType, w: number, h: number): string {
+function shapeNode(shape: ShapeType, w: number, h: number): SVGElement | null {
   const i = 0.75; // half the stroke, so it isn't clipped
   const W = w - i, H = h - i;
   switch (shape) {
-    case "ellipse": return `<ellipse cx="${w / 2}" cy="${h / 2}" rx="${w / 2 - i}" ry="${h / 2 - i}"/>`;
-    case "triangle": return `<path d="M${w / 2},${i} L${W},${H} L${i},${H} Z"/>`;
-    case "diamond": return `<path d="M${w / 2},${i} L${W},${h / 2} L${w / 2},${H} L${i},${h / 2} Z"/>`;
+    case "ellipse": return svgEl("ellipse", { cx: w / 2, cy: h / 2, rx: w / 2 - i, ry: h / 2 - i });
+    case "triangle": return svgEl("path", { d: `M${w / 2},${i} L${W},${H} L${i},${H} Z` });
+    case "diamond": return svgEl("path", { d: `M${w / 2},${i} L${W},${h / 2} L${w / 2},${H} L${i},${h / 2} Z` });
     case "arrow": {
       const head = Math.min(w * 0.45, h * 0.75);
       const x = W - head;
-      return `<path d="M${i},${h * 0.3} H${x} V${i} L${W},${h / 2} L${x},${H} V${h * 0.7} H${i} Z"/>`;
+      return svgEl("path", { d: `M${i},${h * 0.3} H${x} V${i} L${W},${h / 2} L${x},${H} V${h * 0.7} H${i} Z` });
     }
-    case "round": { const r = Math.min(w, h) * 0.18; return `<rect x="${i}" y="${i}" width="${W - i}" height="${H - i}" rx="${r}"/>`; }
-    case "rect": return `<rect x="${i}" y="${i}" width="${W - i}" height="${H - i}" rx="1"/>`;
-    default: return "";
+    case "round": return svgEl("rect", { x: i, y: i, width: W - i, height: H - i, rx: Math.min(w, h) * 0.18 });
+    case "rect": return svgEl("rect", { x: i, y: i, width: W - i, height: H - i, rx: 1 });
+    default: return null;
   }
 }
 
@@ -209,9 +218,14 @@ export class ObjectLayer {
       const fill = o.shape === "text" ? null : resolveColor(o.fill, theme);
       const stroke = o.shape === "text" ? null : resolveColor(o.stroke, theme);
       const text = resolveColor(o.color, theme);
-      const w = o.w * z, h = o.h * z;
-      n.body.innerHTML = o.shape === "text" ? "" :
-        `<svg class="shape" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="${fill ?? "none"}" stroke="${stroke ?? "none"}" stroke-width="1.5" stroke-linejoin="round">${shapePath(o.shape, w, h)}</svg>`;
+      const w = Number(o.w) * z || 1, h = Number(o.h) * z || 1;
+      n.body.replaceChildren();
+      if (o.shape !== "text") {
+        const svg = svgEl("svg", { class: "shape", width: w, height: h, viewBox: `0 0 ${w} ${h}`, fill: fill ?? "none", stroke: stroke ?? "none", "stroke-width": 1.5, "stroke-linejoin": "round" });
+        const path = shapeNode(o.shape, w, h);
+        if (path) svg.append(path);
+        n.body.append(svg);
+      }
       const t = el("div", { class: "text" });
       t.textContent = o.text ?? "";
       t.style.fontSize = `${13 * z}px`;

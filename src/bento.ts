@@ -10,6 +10,8 @@ import { Delimiter, LineEnding } from "./csv";
 import { Book, Doc, SheetObject } from "./doc";
 import { Encoding } from "./encoding";
 import { Style } from "./format";
+import { cleanImages, cleanObjects, cleanStyle, safeColor } from "./sanitize";
+import { validName } from "./fcore";
 
 export const BENTO_VERSION = 2;
 
@@ -127,33 +129,68 @@ export function sheetToData(doc: Doc): SheetData {
   };
 }
 
-/** Fill a sheet from stored data. */
+const MAX_ROW = 1_048_576, MAX_COL = 16_384;
+const isIndex = (v: unknown, max: number): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) < max;
+const DELIMS = new Set<Delimiter>([",", ";", "\t", "|"]);
+const ENCODINGS = new Set<Encoding>(["utf-8", "utf-16le", "utf-16be", "windows-1252"]);
+
+/** Rows from a file: arrays of strings (anything else becomes text or is dropped). */
+function cleanRows(v: unknown): string[][] {
+  if (!Array.isArray(v)) return [];
+  return v.slice(0, MAX_ROW).map((row) => Array.isArray(row)
+    ? row.slice(0, MAX_COL).map((x) => (typeof x === "string" ? x : x === null || x === undefined ? "" : String(x)))
+    : []);
+}
+
+/**
+ * Fill a sheet from stored data. The data comes from a file, so every part
+ * of it is checked: nothing in a .bento can reach the page as markup.
+ */
 export function sheetFromData(doc: Doc, file: SheetData) {
-  doc.load(file.rows ?? []);
-  if (file.name) doc.sheetName = file.name;
-  doc.tabColor = file.tabColor;
-  doc.protected = !!file.protected;
-  doc.objects = (file.objects ?? []).map((o) => ({ ...o }));
-  doc.images = new Map(Object.entries(file.images ?? {}));
+  doc.load(cleanRows(file.rows));
+  if (typeof file.name === "string" && file.name.trim()) doc.sheetName = file.name.slice(0, 100);
+  doc.tabColor = safeColor(file.tabColor);
+  doc.protected = file.protected === true;
+  doc.objects = cleanObjects(file.objects);
+  doc.images = cleanImages(file.images);
   // Map file style ids → this doc's ids (interning can merge duplicates).
-  const map = (file.styles ?? [{}]).map((s) => doc.intern(s));
-  for (const [r, st] of file.cellStyles ?? []) doc.setRowStyleArray(r, st.map((id) => map[id] ?? 0));
-  doc.widths = new Map(Object.entries(file.columns?.widths ?? {}).map(([k, v]) => [Number(k), v]));
-  doc.hidden = new Set(file.columns?.hidden ?? []);
-  doc.frozenRows = file.frozenRows ?? (file.freezeHeader === false ? 0 : 1);
-  doc.frozenCols = file.frozenCols ?? 0;
-  if (file.gridRows) doc.gridRows = Math.max(file.gridRows, doc.rows.length);
-  if (file.gridCols) doc.gridCols = Math.max(file.gridCols, doc.cols);
-  doc.merges = (file.merges ?? []).map(([r0, c0, r1, c1]) => ({ r0, c0, r1, c1 }));
-  doc.filters = new Map(Object.entries(file.filters ?? {}).map(([k, v]) => [Number(k), new Set(v)]));
-  if (file.csv) {
-    doc.delim = file.csv.delimiter ?? ",";
-    doc.eol = file.csv.lineEnding ?? "\r\n";
-    doc.encoding = file.csv.encoding ?? "utf-8";
-    doc.bom = !!file.csv.bom;
+  const map = (Array.isArray(file.styles) ? file.styles : [{}]).map((s) => doc.intern(cleanStyle(s)));
+  for (const entry of Array.isArray(file.cellStyles) ? file.cellStyles : []) {
+    if (!Array.isArray(entry) || !isIndex(entry[0], MAX_ROW) || !Array.isArray(entry[1])) continue;
+    doc.setRowStyleArray(entry[0], entry[1].slice(0, MAX_COL).map((id) => (Number.isInteger(id) ? map[id] ?? 0 : 0)));
+  }
+  const widths = file.columns?.widths && typeof file.columns.widths === "object" ? file.columns.widths : {};
+  doc.widths = new Map(Object.entries(widths)
+    .filter(([k, v]) => isIndex(Number(k), MAX_COL) && Number.isFinite(v))
+    .map(([k, v]) => [Number(k), Math.min(2000, Math.max(0, v))]));
+  doc.hidden = new Set((Array.isArray(file.columns?.hidden) ? file.columns.hidden : []).filter((c) => isIndex(c, MAX_COL)));
+  const frozen = (v: unknown, fallback: number) => (isIndex(v, 10_000) ? v : fallback);
+  doc.frozenRows = frozen(file.frozenRows, file.freezeHeader === false ? 0 : 1);
+  doc.frozenCols = frozen(file.frozenCols, 0);
+  if (isIndex(file.gridRows, MAX_ROW + 1)) doc.gridRows = Math.max(file.gridRows, doc.rows.length);
+  if (isIndex(file.gridCols, MAX_COL + 1)) doc.gridCols = Math.max(file.gridCols, doc.cols);
+  doc.merges = (Array.isArray(file.merges) ? file.merges : [])
+    .filter((m) => Array.isArray(m) && isIndex(m[0], MAX_ROW) && isIndex(m[1], MAX_COL) && isIndex(m[2], MAX_ROW) && isIndex(m[3], MAX_COL) && m[2] >= m[0] && m[3] >= m[1])
+    .map(([r0, c0, r1, c1]) => ({ r0, c0, r1, c1 }));
+  const filters = file.filters && typeof file.filters === "object" ? file.filters : {};
+  doc.filters = new Map(Object.entries(filters)
+    .filter(([k, v]) => isIndex(Number(k), MAX_COL) && Array.isArray(v))
+    .map(([k, v]) => [Number(k), new Set(v.filter((x): x is string => typeof x === "string"))]));
+  if (file.csv && typeof file.csv === "object") {
+    doc.delim = DELIMS.has(file.csv.delimiter) ? file.csv.delimiter : ",";
+    doc.eol = file.csv.lineEnding === "\n" ? "\n" : "\r\n";
+    doc.encoding = ENCODINGS.has(file.csv.encoding) ? file.csv.encoding : "utf-8";
+    doc.bom = file.csv.bom === true;
   }
   doc.refreshView();
-  if (file.rowMeta) doc.setRowMeta(file.rowMeta.heights ?? [], file.rowMeta.hidden ?? []);
+  const meta = file.rowMeta;
+  if (meta && typeof meta === "object") {
+    const heights = (Array.isArray(meta.heights) ? meta.heights : [])
+      .filter((h): h is [number, number] => Array.isArray(h) && isIndex(h[0], MAX_ROW) && Number.isFinite(h[1]) && h[1] > 0)
+      .map(([r, h]) => [r, Math.min(1000, h)] as [number, number]);
+    const hidden = (Array.isArray(meta.hidden) ? meta.hidden : []).filter((r) => isIndex(r, MAX_ROW));
+    doc.setRowMeta(heights, hidden);
+  }
 }
 
 export async function encodeBento(book: Book): Promise<Uint8Array> {
@@ -180,15 +217,24 @@ export async function decodeBento(bytes: Uint8Array, book: Book, makeSheet: (nam
   }
   if (!raw || raw.format !== "bento") throw new Error("This doesn't look like a Bento sheet.");
   if (raw.version > BENTO_VERSION) throw new Error("This sheet was made by a newer version of Bento. Update Bento to open it.");
-  const sheets: SheetData[] = raw.version >= 2 && Array.isArray(raw.sheets) ? raw.sheets : [raw];
+  const sheets: SheetData[] = (raw.version >= 2 && Array.isArray(raw.sheets) ? raw.sheets : [raw])
+    .filter((s) => s && typeof s === "object").slice(0, 500);
+  if (!sheets.length) throw new Error("This Bento sheet has nothing in it — the file may be damaged.");
   const first = book.sheets[0];
   book.sheets = [first];
+  const taken = new Set<string>();
   sheets.forEach((data, i) => {
-    const doc = i === 0 ? first : makeSheet(data.name ?? `Sheet${i + 1}`);
+    // Sheet names must be text and unique (formulas find sheets by name).
+    let name = typeof data.name === "string" && data.name.trim() ? data.name.slice(0, 100) : `Sheet${i + 1}`;
+    while (taken.has(name.toLowerCase())) name = `${name} (${i + 1})`;
+    taken.add(name.toLowerCase());
+    const doc = i === 0 ? first : makeSheet(name);
     if (i > 0) book.sheets.push(doc);
-    sheetFromData(doc, { ...data, name: data.name ?? `Sheet${i + 1}` });
+    sheetFromData(doc, { ...data, name });
   });
-  book.current = Math.min(Math.max(0, raw.active ?? 0), book.sheets.length - 1);
-  book.names = new Map((raw.names ?? []).map((n) => [n.name.toUpperCase(), { name: n.name, ref: n.ref }]));
+  book.current = Number.isInteger(raw.active) ? Math.min(Math.max(0, raw.active!), book.sheets.length - 1) : 0;
+  book.names = new Map((Array.isArray(raw.names) ? raw.names : [])
+    .filter((n) => n && typeof n.name === "string" && typeof n.ref === "string" && validName(n.name))
+    .map((n) => [n.name.toUpperCase(), { name: n.name, ref: n.ref.slice(0, 2000) }]));
   book.recalcAll();
 }

@@ -28,7 +28,13 @@ export function initUpdater(onReady: (version: string, install: () => Promise<vo
         if (!update) return "none";
         await update.download();
         found = true;
-        onReady(update.version, () => update.install());
+        onReady(update.version, async () => {
+          await update.install();
+          // Windows' installer closes and reopens Bento by itself; on a Mac
+          // the new version is in place but this copy is still running.
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("restart_app");
+        });
         return "found";
       } catch (e) {
         // Offline, GitHub hiccup, etc. — the hourly check will try again.

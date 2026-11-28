@@ -13,7 +13,7 @@
  */
 import { isBentoPath } from "./bento";
 import { Book } from "./doc";
-import { isTauri, listDir, readFile, recoveryDir, removeFile, writeFile } from "./native";
+import { isTauri, listRecovery, readFile, recoveryDir, removeFile, writeFile } from "./native";
 
 const QUIET_MS = 2000;
 const MAX_WAIT_MS = 30000;
@@ -131,7 +131,7 @@ export class AutoSaver {
     if (!this.dir) return [];
     const sep = this.dir.includes("\\") ? "\\" : "/";
     let names: string[] = [];
-    try { names = await listDir(this.dir); } catch { return []; }
+    try { names = await listRecovery(); } catch { return []; }
     const out: RecoveredFile[] = [];
     for (const n of names.filter((x) => x.endsWith(".json"))) {
       try {
