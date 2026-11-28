@@ -9,6 +9,7 @@ import { newId } from "./doc";
 import { resolveColor, type Theme } from "./format";
 import type { Grid } from "./grid";
 import { clamp, el } from "./util";
+import { cmdKey } from "./platform";
 
 export interface LayerHost {
   doc(): Doc | null;
@@ -332,7 +333,7 @@ export class ObjectLayer {
     if (this.editingText === id) return;
     const d = this.doc, o = this.find(id);
     if (!d || !o) return;
-    const ctrl = e.ctrlKey || e.metaKey;
+    const ctrl = cmdKey(e);
     const k = e.key.toLowerCase();
     const stop = () => { e.preventDefault(); e.stopPropagation(); };
     if (e.key === "Delete" || e.key === "Backspace") { stop(); this.remove(id); }

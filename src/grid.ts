@@ -1,4 +1,4 @@
-import { isMac } from "./platform";
+import { cmdKey, isAltGr, isMac } from "./platform";
 import { fromTSV, toTSV } from "./csv";
 import { CellSet, DEFAULT_WIDTH, Doc, Rect, Sel, allRects, selRect } from "./doc";
 import { Engine, offsetFormula } from "./formula";
@@ -42,6 +42,8 @@ export interface GridHooks {
   onDropdown?(r: number, c: number, x: number, y: number): void;
   /** An image on the clipboard was pasted. */
   onPasteImage?(file: File): void;
+  /** Paste values only, read straight from the clipboard (when no paste event came). */
+  onPasteValues?(): void;
 }
 
 type Drag =
@@ -147,6 +149,7 @@ const REF_COLORS = ["#4f86c6", "#d97757", "#6c8c55", "#9b7bb8", "#c9922e", "#3d9
 export class Grid {
   doc: Doc | null = null;
   private pasteValuesNext = false;
+  private pasteValuesTimer = 0;
   /** Gridline strength, 0–1 (Preferences). */
   gridAlpha = prefNumber("bento.gridOpacity", 100) / 100;
   /** Where Enter moves after typing (Preferences). */
@@ -2516,8 +2519,8 @@ export class Grid {
   /** Keyboard handling while the grid (not the editor) has focus. */
   private onSinkKey(e: KeyboardEvent) {
     const d = this.doc;
-    if (!d || d.loading !== null) return;
-    const ctrl = e.ctrlKey || e.metaKey;
+    if (!d || d.loading !== null || isAltGr(e)) return; // AltGr is typing (\ [ ] @ €…)
+    const ctrl = cmdKey(e);
     const sh = e.shiftKey;
     const s = d.sel;
     let handled = true;
@@ -2833,15 +2836,27 @@ export class Grid {
     this.sink.addEventListener("paste", (e) => {
       e.preventDefault();
       const pic = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
-      if (pic && this.hooks.onPasteImage) { this.hooks.onPasteImage(pic); return; }
-      const t = e.clipboardData?.getData("text/plain");
       const mode = this.pasteValuesNext ? "values" : "normal";
       this.pasteValuesNext = false;
+      clearTimeout(this.pasteValuesTimer);
+      if (pic && this.hooks.onPasteImage) { this.hooks.onPasteImage(pic); return; }
+      const t = e.clipboardData?.getData("text/plain");
       if (t) this.paste(t, mode);
     });
-    // Ctrl+Shift+V: the browser still fires "paste"; remember to drop formulas and formatting.
+    // Ctrl+Shift+V: the browser still fires "paste"; remember to drop formulas
+    // and formatting — but only for that paste. If no paste follows (an empty
+    // clipboard, or a Mac, where ⌘⇧V isn't a paste), ask the clipboard directly
+    // instead of leaving the flag set for the next ordinary paste.
     this.sink.addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "v") this.pasteValuesNext = true;
+      if (cmdKey(e) && e.shiftKey && e.key.toLowerCase() === "v") {
+        this.pasteValuesNext = true;
+        clearTimeout(this.pasteValuesTimer);
+        this.pasteValuesTimer = window.setTimeout(() => {
+          if (!this.pasteValuesNext) return;
+          this.pasteValuesNext = false;
+          this.hooks.onPasteValues?.();
+        }, 250);
+      }
     }, true);
 
     this.editor.addEventListener("keydown", (e) => this.onEditorKey(e));

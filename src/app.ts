@@ -27,7 +27,8 @@ import type { ChartObject, ChartType, ShapeObject, ShapeType, SheetObject } from
 import { appVersion, initUpdater } from "./updater";
 import { maxOf } from "./util";
 import { basename, cellName, clamp, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
-import { isMac, keys, localiseTitles, osName } from "./platform";
+import { cmdKey, isAltGr, isMac, keys, localiseTitles, osName } from "./platform";
+import { WheelZoom } from "./wheelzoom";
 
 type Theme = "system" | "light" | "dusk" | "dark";
 const $ = (id: string) => document.getElementById(id)!;
@@ -78,6 +79,7 @@ export class App {
       onRender: () => this.objects?.render(),
       onDropdown: (r, c, x, y) => this.dropdownMenu(r, c, x, y),
       onPasteImage: (f) => this.insertImageFile(f, "over"),
+      onPasteValues: () => this.clipboardPaste("values"),
     });
     this.objects = new ObjectLayer(this.grid, {
       doc: () => this.active,
@@ -2228,11 +2230,30 @@ export class App {
     this.grid.editor.addEventListener("input", () => { input.value = this.grid.editor.value; });
   }
 
+  private wheelZoom = new WheelZoom(isMac);
+
+  /** Ctrl + wheel / pinch zoom (see wheelzoom.ts for why it's careful). */
+  private onZoomWheel(e: WheelEvent) {
+    const a = this.wheelZoom.handle(e, performance.now());
+    if (a.kind === "scroll") return; // let the sheet scroll
+    e.preventDefault();
+    if (a.kind === "step") this.stepZoom(a.dir);
+    else if (a.kind === "scale") this.setZoom(this.grid.zoom * a.factor);
+  }
+
   private bindKeys() {
     window.addEventListener("keydown", (e) => {
-      const ctrl = e.ctrlKey || e.metaKey;
+      // AltGr types characters (\ ] @ € …) on many keyboards: let it.
+      if (isAltGr(e)) return;
+      const ctrl = cmdKey(e);
       const k = e.key.toLowerCase();
       const d = this.active;
+      // The web view's own reload (and print) would throw away every open tab.
+      // Ctrl+Shift+R is still "align right" below.
+      if ((ctrl && (k === "r" || k === "p")) || e.key === "BrowserRefresh") {
+        e.preventDefault();
+        if (!(ctrl && e.shiftKey && k === "r" && d)) return;
+      }
       const typing = (() => { const a = document.activeElement; return a instanceof HTMLInputElement || a instanceof HTMLSelectElement || a === this.grid.editor; })();
       if (ctrl && k === "a" && d && !typing && !e.defaultPrevented) { e.preventDefault(); this.grid.selectAll(); this.grid.focus(); }
       else if (ctrl && k === "n") { e.preventDefault(); this.newDoc(); }
@@ -2264,7 +2285,7 @@ export class App {
       else if (ctrl && e.shiftKey && k === "f") { e.preventDefault(); this.setToolbar(document.getElementById("app")!.classList.contains("toolbar-hidden")); }
       else if (ctrl && k === "f") { e.preventDefault(); if (d) this.find.open(false); }
       else if (ctrl && k === "h" && (!isMac || e.shiftKey)) { e.preventDefault(); if (d) this.find.open(true); }
-      else if (ctrl && e.key === "Tab") {
+      else if (e.ctrlKey && e.key === "Tab") { // Control+Tab on a Mac too
         e.preventDefault();
         if (this.docs.length > 1 && d) {
           const i = this.docs.indexOf(d);
@@ -2282,7 +2303,7 @@ export class App {
         const next = sh[(i + (e.key === "PageDown" ? 1 : -1) + sh.length) % sh.length];
         if (next !== d) this.showSheet(next);
       }
-      else if (ctrl && e.altKey && (e.key === "-" || e.code === "Minus") && d) {
+      else if (ctrl && e.altKey && (e.key === "-" || (isMac && e.code === "Minus")) && d) { // ⌥- types "–" on a Mac
         // Delete selected whole rows or columns (Sheets: Ctrl+Alt+-).
         e.preventDefault();
         const s = selRect(d.sel);
@@ -2305,12 +2326,8 @@ export class App {
       });
     });
     window.addEventListener("blur", () => closeMenus());
-    // Ctrl + mouse wheel zooms the grid.
-    $("grid-wrap").addEventListener("wheel", (e) => {
-      if (!e.ctrlKey && !e.metaKey) return;
-      e.preventDefault();
-      this.stepZoom(e.deltaY < 0 ? 1 : -1);
-    }, { passive: false });
+    // Ctrl + wheel (or a trackpad pinch) zooms the grid.
+    $("grid-wrap").addEventListener("wheel", (e) => this.onZoomWheel(e), { passive: false });
   }
 }
 

@@ -5,6 +5,27 @@
  */
 export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
 
+/**
+ * The shortcut key: ⌘ on a Mac, Ctrl elsewhere. On a Mac, Control+letter
+ * moves the cursor in text boxes (Control+A/E/F/B/N/P…), so it must never
+ * run an app command there.
+ */
+export function cmdKey(e: { ctrlKey: boolean; metaKey: boolean }): boolean {
+  return isMac ? e.metaKey : e.ctrlKey;
+}
+
+/**
+ * AltGr, which on Windows arrives as Ctrl+Alt. On many keyboards it types
+ * characters (German AltGr+ß = \, French AltGr+) = ], AltGr+E = €…), so a
+ * key press with it is typing, never a shortcut.
+ */
+export function isAltGr(e: KeyboardEvent): boolean {
+  if (isMac) return false;
+  if (e.getModifierState?.("AltGraph")) return true;
+  // Some setups don't report AltGraph: Ctrl+Alt giving a symbol is still AltGr.
+  return e.ctrlKey && e.altKey && e.key.length === 1 && !/^[a-z0-9=+-]$/i.test(e.key);
+}
+
 /** Name of the OS for "Match system"-style labels. */
 export const osName = isMac ? "macOS" : "Windows";
 
@@ -24,7 +45,7 @@ export function keys(text: string): string {
     .replace(/Ctrl\+Y\b/g, "Ctrl+Shift+Z")
     .replace(/Ctrl\+H\b/g, "Ctrl+Shift+H")
     .replace(/Ctrl\+Tab\b/g, "Control+Tab")
-    .replace(/Ctrl \+ scroll/g, "⌘ + scroll or pinch")
+    .replace(/Ctrl \+ scroll/g, "Pinch")
     .replace(/\bCtrl-(click|drag)/g, "⌘-$1")
     .replace(/((?:(?:Control|Ctrl|Alt|Shift)\+)+)([^\s)/,]+|,)/g, (_, mods: string, key: string) => macCombo(mods, key));
 }
