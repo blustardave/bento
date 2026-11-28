@@ -1,7 +1,7 @@
 /* Keyboard and wheel handling. */
 import "./dom";
 import { WheelZoom, SCROLL_TAIL_MS } from "../src/wheelzoom";
-import { isAltGr, cmdKey } from "../src/platform";
+import { isAltGr, cmdKey, isMac } from "../src/platform";
 
 let fails = 0;
 function eq(a: unknown, b: unknown, msg: string) {
@@ -39,9 +39,11 @@ for (const mac of [false, true]) {
 /* AltGr (Ctrl+Alt on Windows) types characters; it's never a shortcut. */
 {
   const k = (key: string, o: KeyboardEventInit = {}) => new KeyboardEvent("keydown", { key, ctrlKey: true, altKey: true, ...o });
-  eq([isAltGr(k("\\")), isAltGr(k("]")), isAltGr(k("@")), isAltGr(k("€"))], [true, true, true, true], "AltGr symbols are typing");
+  // (The tests run on whatever machine CI uses, so check that platform's rules.)
+  const altGr = !isMac; // Macs have no AltGr: Ctrl+Alt there is never typing
+  eq([isAltGr(k("\\")), isAltGr(k("]")), isAltGr(k("@")), isAltGr(k("€"))], [altGr, altGr, altGr, altGr], "AltGr symbols are typing (off a Mac)");
   eq([isAltGr(k("-")), isAltGr(k("a")), isAltGr(new KeyboardEvent("keydown", { key: "\\", ctrlKey: true }))], [false, false, false], "real Ctrl+Alt shortcuts and Ctrl+\\ still work");
-  eq([cmdKey({ ctrlKey: true, metaKey: false }), cmdKey({ ctrlKey: false, metaKey: true })], [true, false], "Ctrl is the shortcut key off a Mac");
+  eq([cmdKey({ ctrlKey: true, metaKey: false }), cmdKey({ ctrlKey: false, metaKey: true })], isMac ? [false, true] : [true, false], isMac ? "⌘ is the shortcut key on a Mac" : "Ctrl is the shortcut key off a Mac");
 }
 
 console.log(fails ? `${fails} INPUT FAILURE(S)` : "INPUT PASS");
