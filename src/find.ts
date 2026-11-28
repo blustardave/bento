@@ -226,7 +226,7 @@ export class FindPanel {
     d.setCells(cells, "Replace all");
     this.onChange();
     const done = cells.length ? `Replaced ${formatInt(cells.length)} cell${cells.length === 1 ? "" : "s"}` : "Nothing to replace";
-    const left = skipped ? ` · ${formatInt(skipped)} formula answer${skipped === 1 ? "" : "s"} matched but weren't changed (turn on “In formulas” to edit formulas)` : "";
+    const left = skipped ? ` · ${skipped === 1 ? "1 formula answer matched but wasn't" : `${formatInt(skipped)} formula answers matched but weren't`} changed (turn on “In formulas” to edit formulas)` : "";
     toast(done + left);
     this.search(false);
   }

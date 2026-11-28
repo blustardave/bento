@@ -28,6 +28,13 @@ eq(f("=1/3&\"\""), "0.333333333333333", "15 significant digits in text, as in Ex
 eq(f("=A1*1"), "1234567.89123457", "big numbers keep 15 digits");
 eq(f("=A2+A3"), "0.3", "float noise stays hidden");
 
+// Text that merely starts with "=" shows as text; a broken formula still shows an error.
+{
+  const t = new Doc("t", null);
+  t.load([["=== Totals ==="], ["=)"], ["=SUM(A1"], ["=A1"]]);
+  eq([t.display(0, 0), t.display(1, 0), t.display(2, 0), t.display(3, 0)], ["=== Totals ===", "=)", "#ERROR!", "=== Totals ==="], "text vs broken formulas");
+}
+
 // CSV export of calculated values keeps their precision.
 const e = new Doc("t", null);
 e.load([["1234567.891234567", "=A1*2"]]);

@@ -153,6 +153,8 @@ export class Engine implements EngineLike {
     const raw = this.host.raw(r, c);
     if (raw === "") { const s = this.spilled(r, c); return s === undefined ? "" : s; }
     if (raw.charCodeAt(0) !== 61) return literal(raw);
+    // Text that can't be a formula at all ("=== Totals ===" in a CSV) is just text.
+    if (this.unparseable(raw)) return raw;
     const res = this.result(r, c, raw);
     if (isArr(res)) return this.blocked(r, c, res) ? ERR.spill : res.v[0][0];
     return res;
@@ -167,7 +169,7 @@ export class Engine implements EngineLike {
       const a = this.spillAnchor(r, c);
       return a ? this.show(s, this.dateKind(a.r, a.c)) : toStr(s);
     }
-    if (raw.charCodeAt(0) !== 61) return raw;
+    if (raw.charCodeAt(0) !== 61 || this.unparseable(raw)) return raw;
     return this.show(this.value(r, c), this.dateKind(r, c));
   }
 
@@ -239,6 +241,16 @@ export class Engine implements EngineLike {
    * Text starting with "=" that isn't a working formula at all: it doesn't
    * parse ("=== Totals ==="), or is a lone word that names nothing ("=Notes").
    */
+  /**
+   * Text that starts with "=" but isn't an attempt at a formula ("=== Totals
+   * ===", "= note", "=)"): it doesn't parse, and what follows the "=" can't
+   * begin a formula. A real attempt with a mistake ("=SUM(A1") still shows
+   * #ERROR!, so typos aren't mistaken for accepted text.
+   */
+  private unparseable(raw: string): boolean {
+    return raw.length > 1 && !/^=[A-Za-z0-9_$@'"(+\-.{#]/.test(raw) && isErr(this.compile(raw));
+  }
+
   isNotAFormula(raw: string): boolean {
     const ast = this.compile(raw);
     return isErr(ast) || (ast.k === "name" && this.host.definedName?.(ast.v) === undefined);
