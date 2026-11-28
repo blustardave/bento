@@ -1140,9 +1140,9 @@ export class Book {
     this.structureDirty = true;
   }
 
-  /** After a sheet is added or removed, formulas pointing at it change. */
+  /** After a sheet is added or removed, or names change, formulas pointing at them change. */
   recalcAll() {
-    for (const s of this.sheets) { s.engine.invalidate(); s.version++; }
+    for (const s of this.sheets) { s.engine.namesChanged(); s.version++; }
   }
 
   constructor(name: string, path: string | null) {

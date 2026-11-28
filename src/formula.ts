@@ -37,6 +37,47 @@ export interface RefInfo { sheet?: string; r1: number; c1: number; r2: number; c
 const KEY = 65536;
 const MAX_SPILL = 2_000_000;
 
+/**
+ * Formulas that read formulas that read formulas… (a running total down
+ * 10,000 rows) would overflow the JavaScript stack if worked out by plain
+ * recursion. So recursion through cells is capped: past DEPTH_LIMIT the
+ * engine stops, works out the deepest cell on its own first, and tries
+ * again. Each retry starts from a cached result, so the total work stays
+ * about the same while the stack never grows past the cap.
+ */
+const DEPTH_LIMIT = 120;
+const depth = { n: 0 };
+
+/** Thrown (internally) when a chain of cells gets too deep: "work this one out first". */
+class TooDeep {
+  constructor(readonly eng: Engine, readonly r: number, readonly c: number) {}
+}
+
+/** Run a top-level calculation, settling any too-deep chains it runs into. */
+function settled<T>(fn: () => T): T {
+  for (;;) {
+    try { return fn(); } catch (e) {
+      if (!(e instanceof TooDeep)) throw e;
+      // Work down the chain, deepest first, without letting the stack grow.
+      const work: TooDeep[] = [e];
+      const onStack = new Set<string>([e.eng.uid + ":" + (e.r * KEY + e.c)]);
+      while (work.length) {
+        const w = work[work.length - 1];
+        try { w.eng.compute(w.r, w.c); work.pop(); onStack.delete(w.eng.uid + ":" + (w.r * KEY + w.c)); }
+        catch (e2) {
+          if (!(e2 instanceof TooDeep)) throw e2;
+          const id = e2.eng.uid + ":" + (e2.r * KEY + e2.c);
+          // Back to a cell we're already waiting on: a (long) circular reference.
+          if (onStack.has(id)) e2.eng.markCircular(e2.r, e2.c);
+          else { onStack.add(id); work.push(e2); }
+        }
+      }
+    }
+  }
+}
+
+let engineIds = 0;
+
 export class Engine implements EngineLike {
   private results = new Map<number, Val | ArrV>();
   private active = new Set<number>();
@@ -46,6 +87,9 @@ export class Engine implements EngineLike {
   private building = false;
   private candidates: Set<number> | null = null;
   private namesBusy = new Set<string>();
+  /** Can this formula give an array? By formula text (cheap to keep, unlike ASTs). */
+  private arrayish = new Map<string, boolean>();
+  readonly uid = ++engineIds;
 
   constructor(private readonly host: Host) {}
 
@@ -62,12 +106,39 @@ export class Engine implements EngineLike {
     this.invalidate();
   }
 
+  /** Defined names changed: whether formulas can spill may have changed too. */
+  namesChanged() {
+    this.arrayish.clear();
+    this.structureChanged();
+  }
+
   /** A cell's text changed (keeps the list of possible spills current). */
   noteCell(r: number, c: number, raw: string) {
     if (!this.candidates) return;
     const key = r * KEY + c;
-    if (raw.charCodeAt(0) === 61) { const ast = this.compile(raw); if (!isErr(ast) && mayArray(ast)) { this.candidates.add(key); return; } }
+    if (raw.charCodeAt(0) === 61 && this.mayGiveArray(raw)) { this.candidates.add(key); return; }
     this.candidates.delete(key);
+  }
+
+  private mayGiveArray(raw: string): boolean {
+    let v = this.arrayish.get(raw);
+    if (v === undefined) {
+      const ast = this.compile(raw);
+      v = !isErr(ast) && mayArray(ast, (name) => this.nameMayArray(name));
+      if (this.arrayish.size > 500_000) this.arrayish.clear();
+      this.arrayish.set(raw, v);
+    }
+    return v;
+  }
+
+  /** Could a defined name stand for more than one cell? (A name for one cell can't spill.) */
+  private nameMayArray(name: string, seen = new Set<string>()): boolean {
+    const text = this.host.definedName?.(name);
+    if (text === undefined) return true; // a LET variable or LAMBDA parameter: can't tell
+    if (seen.has(name) || seen.size > 8) return true;
+    seen.add(name);
+    const ast = this.compile("=" + text);
+    return isErr(ast) || mayArray(ast, (n) => this.nameMayArray(n, seen));
   }
 
   rowCount() { return Math.max(1, this.host.rowCount()); }
@@ -112,29 +183,53 @@ export class Engine implements EngineLike {
 
   /** A formula's full result (arrays included), cached. */
   private result(r: number, c: number, raw = this.host.raw(r, c)): Val | ArrV {
+    const hit = this.results.get(r * KEY + c);
+    if (hit !== undefined) return hit;
+    // The outermost calculation handles chains that get too deep (see `settled`).
+    return depth.n === 0 ? settled(() => this.compute(r, c, raw)) : this.compute(r, c, raw);
+  }
+
+  /** Work out one formula cell (used by `result`, and by `settled` for deep chains). */
+  compute(r: number, c: number, raw = this.host.raw(r, c)): Val | ArrV {
     const key = r * KEY + c;
     const hit = this.results.get(key);
     if (hit !== undefined) return hit;
     if (this.active.has(key)) return ERR.circ;
+    if (depth.n >= DEPTH_LIMIT) throw new TooDeep(this, r, c);
     this.active.add(key);
+    depth.n++;
     let v: Val | ArrV;
     try {
       const ast = this.compile(raw);
       v = isErr(ast) ? ast : normalize(this.ev(ast, null, r, c));
     } catch (e) {
-      v = isErr(e) ? e : ERR.parse; // includes stack overflow on very deep chains
+      if (e instanceof TooDeep) throw e; // not an answer for this cell: it'll be retried
+      // Very deep recursion within one formula (e.g. a recursive LAMBDA) can still run out of stack.
+      v = isErr(e) ? e : e instanceof RangeError ? ERR.num : ERR.parse;
     } finally {
       this.active.delete(key);
+      depth.n--;
     }
     this.results.set(key, v);
+    // A formula that wasn't expected to give an array did: it can spill after all.
+    if (isArr(v) && this.candidates && !this.candidates.has(key)) { this.candidates.add(key); this.spillsReady = false; }
     return v;
+  }
+
+  /** A long circular chain found by `settled`. */
+  markCircular(r: number, c: number) {
+    this.results.set(r * KEY + c, ERR.circ);
   }
 
   compile(src: string): Node | FErr {
     let ast = this.asts.get(src);
     if (ast === undefined) {
       try { ast = parse(src.slice(1)); } catch (e) { ast = isErr(e) ? e : ERR.parse; }
-      if (this.asts.size > 5000) this.asts.clear();
+      // Drop the oldest entries rather than everything, so a big sheet doesn't re-parse constantly.
+      if (this.asts.size >= 50_000) {
+        let n = 0;
+        for (const k of this.asts.keys()) { this.asts.delete(k); if (++n >= 5_000) break; }
+      }
       this.asts.set(src, ast);
     }
     return ast;
@@ -559,20 +654,69 @@ function binop(op: string, a: Val, b: Val): Val {
   return ERR.value;
 }
 
-/** Could this formula give an array (and so spill)? */
-export function mayArray(n: Node): boolean {
+/** Rows × columns a node is sure to cover, if that can be told from the formula alone. */
+function shapeOf(n: Node): [number, number] | null {
   switch (n.k) {
-    case "range": case "spill": case "array": case "name": case "call": case "union": return true;
+    case "ref": return n.sh2 ? null : [1, 1];
+    case "range": {
+      if (n.sh2) return null;
+      const h = n.r1 < 0 ? Infinity : n.r2 - n.r1 + 1, w = n.c1 < 0 ? Infinity : n.c2 - n.c1 + 1;
+      return [h, w];
+    }
+    case "paren": return shapeOf(n.a);
+    default: return null;
+  }
+}
+
+/**
+ * Could this formula give an array (and so spill)? Erring towards "yes" is
+ * safe but costly: every possible spill is worked out after each edit, so
+ * common one-value lookups (XLOOKUP into one column, INDEX/MATCH, a name
+ * for one cell) are recognised as such. A formula that gives an array
+ * anyway is picked up when it's calculated (see Engine.compute).
+ */
+export function mayArray(n: Node, nameMayArray: (name: string) => boolean = () => true): boolean {
+  const may = (x: Node | undefined): boolean => !!x && x.k !== "omit" && mayArray(x, nameMayArray);
+  switch (n.k) {
+    case "range": case "spill": case "array": case "call": case "union": return true;
+    case "name": return nameMayArray(n.v);
     case "lit": case "ref": case "omit": return false;
-    case "paren": case "neg": case "pct": return mayArray(n.a);
-    case "bin": return mayArray(n.a) || mayArray(n.b);
+    case "paren": case "neg": case "pct": return may(n.a);
+    case "bin": return may(n.a) || may(n.b);
     case "fn": {
       const f = FUNCS[n.name];
       if (!f) return true;
+      const a = n.args;
+      if (n.name === "XLOOKUP") {
+        // One value comes back unless the key is an array, the fallback is,
+        // or the result range is wider than the lookup range is long.
+        if (may(a[0]) || may(a[3])) return true;
+        const look = shapeOf(a[1]), res = shapeOf(a[2]);
+        if (!look || !res) return true;
+        if (look[1] === 1) return res[1] !== 1; // looking down a column
+        if (look[0] === 1) return res[0] !== 1; // looking along a row
+        return true;
+      }
+      if (n.name === "INDEX") {
+        // INDEX(one column, row) or INDEX(range, row, column) with real numbers is one cell.
+        if (a.slice(1).some(may)) return true;
+        const zero = (x: Node | undefined) => !x || x.k === "omit" || (x.k === "lit" && x.v === 0);
+        const s = shapeOf(a[0]);
+        if (!s) return true;
+        if (s[0] === 1 && s[1] === 1) return false;
+        if (s[1] === 1 || s[0] === 1) return zero(a[1]);
+        return zero(a[1]) || zero(a[2]);
+      }
+      if (n.name === "OFFSET") {
+        // OFFSET(cell, rows, cols) with no height/width is one cell.
+        if (a.slice(1).some(may)) return true;
+        const s = shapeOf(a[0]);
+        return !(s && s[0] === 1 && s[1] === 1 && (!a[3] || a[3].k === "omit") && (!a[4] || a[4].k === "omit"));
+      }
       if (f.spills) return true;
-      if (["IF", "IFS", "IFERROR", "IFNA", "SWITCH", "CHOOSE"].includes(n.name)) return n.args.some(mayArray);
-      if (f.lift === true) return n.args.some(mayArray);
-      if (Array.isArray(f.lift)) return f.lift.some((i) => n.args[i] && mayArray(n.args[i]));
+      if (["IF", "IFS", "IFERROR", "IFNA", "SWITCH", "CHOOSE"].includes(n.name)) return a.some(may);
+      if (f.lift === true) return a.some(may);
+      if (Array.isArray(f.lift)) return f.lift.some((i) => may(a[i]));
       return false;
     }
   }
