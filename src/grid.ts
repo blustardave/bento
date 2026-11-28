@@ -77,7 +77,11 @@ interface Reorder {
 interface Editing { r: number; c: number; mode: "replace" | "edit" }
 
 /** Internal clipboard: lets formulas survive copy/paste inside Bento. */
-let lastCopy: { tsv: string; raw: string[][]; values: string[][]; styles: Style[][]; rows: number[]; c: number; widths?: number[]; heights?: (number | undefined)[] } | null = null;
+let lastCopy: {
+  tsv: string; raw: string[][]; values: string[][]; styles: Style[][]; rows: number[]; c: number; widths?: number[]; heights?: (number | undefined)[];
+  /** Set by Cut: the cells move when pasted (if nothing on the sheet changed in between). */
+  cut?: { doc: Doc; version: number; rect: Rect };
+} | null = null;
 
 export type PasteMode = "normal" | "values" | "format" | "plain" | "transpose";
 
@@ -821,6 +825,26 @@ export class Grid {
       ctx.restore();
     }
     this.drawFillHandle(main);
+    this.drawCutOutline();
+  }
+
+  /** Dashed outline round cells that have been cut (until pasted, Esc, or a change). */
+  private drawCutOutline() {
+    const d = this.doc, cut = lastCopy?.cut;
+    if (!d || !cut || cut.doc !== d) return;
+    if (cut.version !== d.version) { lastCopy!.cut = undefined; return; }
+    const r = cut.rect, ctx = this.ctx;
+    const x0 = this.colLeft(r.c0), x1 = this.colLeft(r.c1) + this.cw(r.c1);
+    const y0 = this.rowTop(r.r0), y1 = this.rowTop(r.r1) + this.rowH(r.r1);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(this.rowHeaderWidth(), this.hh, this.w, this.h);
+    ctx.clip();
+    ctx.strokeStyle = this.colors.accent;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 3]);
+    ctx.strokeRect(Math.round(x0) + 0.75, Math.round(y0) + 0.75, Math.round(x1 - x0) - 1.5, Math.round(y1 - y0) - 1.5);
+    ctx.restore();
   }
 
   private drawCells(r0: number, r1: number, c0: number, c1: number, sel: Rect, frozen: boolean) {
@@ -995,6 +1019,23 @@ export class Grid {
       for (let c = c0; c <= Math.min(c1, len - 1); c++) if (!covered.has(r * 65536 + c)) drawText(r, c);
     }
     for (const [r, c] of anchors) drawText(r, c);
+    // Long text from a cell scrolled off to the left can still run into view:
+    // draw the nearest filled cell to the left of each row (if it overflows,
+    // drawText carries it across the empty cells; if not, it's clipped away).
+    if (c0 > this.fc) {
+      const lo = Math.max(this.fc, c0 - 60);
+      for (let r = r0; r <= r1; r++) {
+        const dr = d.dataRow(r);
+        if (dr >= d.rows.length) break;
+        const row = d.rows[dr];
+        if (row[c0]) continue; // the first visible cell is filled: nothing can run into it
+        for (let cc = Math.min(c0 - 1, row.length - 1); cc >= lo; cc--) {
+          if (!row[cc]) continue;
+          if (!covered.has(r * 65536 + cc) && !this.mergeAt(r, cc)) drawText(r, cc);
+          break;
+        }
+      }
+    }
     // Values spilled from dynamic-array formulas (FILTER, SORT, SEQUENCE…).
     for (const sp of d.engine.spillRects()) {
       for (let i = 0; i < sp.h; i++) {
@@ -2327,7 +2368,7 @@ export class Grid {
     if (d.sel.extra?.length) { this.hooks.onNotice?.("Copying more than one range at a time isn't supported"); return null; }
     const s = selRect(d.sel);
     const cells = (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
-    if (cells > 5_000_000) return null;
+    if (cells > 5_000_000) { this.hooks.onNotice?.("That selection is too big to copy (over 5 million cells)"); return null; }
     const raw: string[][] = [];
     const values: string[][] = [];
     const shown: string[][] = [];
@@ -2356,7 +2397,8 @@ export class Grid {
     // Whole columns/rows bring their size along when pasted onto whole columns/rows.
     if (this.isWholeCols(s) && !this.isWholeRows(s)) lastCopy.widths = Array.from({ length: s.c1 - s.c0 + 1 }, (_, j) => d.width(s.c0 + j));
     if (this.isWholeRows(s) && !this.isWholeCols(s)) lastCopy.heights = rows.map((r) => d.manualHeight(r));
-    if (cut) this.clear("Cut");
+    // Like Excel and Sheets, cut cells stay put (outlined) until pasted.
+    if (cut) { lastCopy.cut = { doc: d, version: d.version, rect: s }; this.invalidate(); }
     return tsv;
   }
 
@@ -2364,6 +2406,8 @@ export class Grid {
     const d = this.doc;
     if (!d) return;
     let internal = lastCopy && lastCopy.tsv === text ? lastCopy : null;
+    // A cut that's still current moves the cells (only a plain paste can).
+    const cut = internal?.cut && internal.cut.doc === d && internal.cut.version === d.version && mode === "normal" ? internal : null;
     if (mode === "format" && !internal) { this.hooks.onNotice?.("Formatting can only be pasted from cells copied in Bento"); return; }
     let block = internal ? (mode === "values" ? internal.values : internal.raw) : fromTSV(text);
     let styles = internal?.styles;
@@ -2391,7 +2435,7 @@ export class Grid {
       const dr = d.dataRow(disp);
       for (let j = 0; j < w; j++) {
         let v = fill ? block[0][0] : block[i][j] ?? "";
-        if (internal && mode !== "values" && mode !== "transpose") {
+        if (internal && mode !== "values" && mode !== "transpose" && !cut) {
           const srcR = internal.rows[fill ? 0 : i];
           const srcC = internal.c + (fill ? 0 : j);
           v = offsetFormula(v, dr - srcR, s.c0 + j - srcC);
@@ -2406,7 +2450,14 @@ export class Grid {
       }
     }
     const after: Sel = { ar: s.r0, ac: s.c0, fr: s.r0 + h - 1, fc: s.c0 + w - 1 };
-    d.setCells(cells, mode === "normal" ? "Paste" : "Paste special", after);
+    if (cut) {
+      // Empty the cut cells first (except where the paste lands), all in one undo step.
+      const landing = new Set(cells.map((x) => x.r * 65536 + x.c));
+      const clears: CellSet[] = [];
+      cut.rows.forEach((r) => { for (let j = 0; j < (cut.raw[0]?.length ?? 0); j++) if (!landing.has(r * 65536 + cut.c + j)) clears.push({ r, c: cut.c + j, v: "", style: 0 }); });
+      d.setCells([...clears, ...cells], "Move cells", after);
+      lastCopy = null; // as in Excel, a cut pastes once
+    } else d.setCells(cells, mode === "normal" ? "Paste" : "Paste special", after);
     if (internal && (mode === "normal" || mode === "format")) {
       if (internal.widths && this.isWholeCols(s)) {
         const before = new Map(d.widths);
@@ -2553,7 +2604,12 @@ export class Grid {
       }
       case "Delete":
       case "Backspace": this.clear(); break;
-      case "Escape": this.matcher = null; this.invalidate(); handled = false; break;
+      case "Escape":
+        this.matcher = null;
+        if (lastCopy?.cut) lastCopy.cut = undefined; // Esc cancels a cut
+        this.invalidate();
+        handled = false;
+        break;
       case " ":
         // Space ticks the selection's checkboxes.
         handled = !ctrl && !sh && !e.altKey && d.style(d.dataRow(s.ar), s.ac).check === true && this.toggleChecks();
@@ -2832,13 +2888,16 @@ export class Grid {
       // IME input: hand over to the real editor straight away.
       this.startEdit("replace", "");
     });
+    // (If copy() refuses, it has said why; keep the browser from copying the empty sink instead.)
     this.sink.addEventListener("copy", (e) => {
       const t = this.copy();
-      if (t !== null) { e.clipboardData?.setData("text/plain", t); e.preventDefault(); }
+      e.preventDefault();
+      if (t !== null) e.clipboardData?.setData("text/plain", t);
     });
     this.sink.addEventListener("cut", (e) => {
       const t = this.copy(true);
-      if (t !== null) { e.clipboardData?.setData("text/plain", t); e.preventDefault(); }
+      e.preventDefault();
+      if (t !== null) e.clipboardData?.setData("text/plain", t);
     });
     this.sink.addEventListener("paste", (e) => {
       e.preventDefault();

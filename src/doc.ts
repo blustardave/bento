@@ -1,7 +1,7 @@
 import { Delimiter, LineEnding, serialize } from "./csv";
 import { Encoding } from "./encoding";
 import { Engine, offsetFormula, remapFormula, renameNameInFormula, renameSheetInFormula, shiftFormula } from "./formula";
-import { Style, isEmptyStyle, styleKey } from "./format";
+import { Style, isEmptyStyle, parseDate, styleKey } from "./format";
 import { maxOf, parseNum, pushAll } from "./util";
 
 /** Selection in *display* coordinates (what's on screen, after filtering). */
@@ -1032,20 +1032,8 @@ export class Doc {
       run: () => {
         before = this.rows;
         const body = this.rows.slice(start);
-        const keys = body.map((row, i) => {
-          const disp = row[col] === undefined ? "" : row[col].charCodeAt(0) === 61 ? this.engine.display(i + start, col) : row[col];
-          const n = parseNum(disp);
-          return { row, s: disp, n, blank: disp === "", from: i + start };
-        });
-        const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-        const dir = desc ? -1 : 1;
-        keys.sort((a, b) => {
-          if (a.blank !== b.blank) return a.blank ? 1 : -1;
-          const an = !Number.isNaN(a.n), bn = !Number.isNaN(b.n);
-          if (an && bn) return (a.n - b.n) * dir;
-          if (an !== bn) return (an ? -1 : 1) * dir; // numbers before text (ascending)
-          return coll.compare(a.s, b.s) * dir;
-        });
+        const keys = body.map((row, i) => ({ row, from: i + start, ...sortKey(row[col] === undefined ? "" : row[col].charCodeAt(0) === 61 ? this.engine.display(i + start, col) : row[col]) }));
+        keys.sort(sortCompare(desc));
         this.rows = [...this.rows.slice(0, start), ...keys.map((k) => k.row)];
         // Formulas move like copied cells: =F185-G185 that lands in row 2 becomes =F2-G2
         // (relative parts follow the row; $-anchored parts stay put), as in Excel and Sheets.
@@ -1080,6 +1068,31 @@ export class Doc {
         this.engine.structureChanged();
       },
     });
+    return true;
+  }
+
+  /**
+   * Sort just the selected cells (data rows r0–r1, columns c0–c1) by one of
+   * their columns, as one undo step. Cells outside the range stay where they
+   * are. Returns false if merged cells are in the way.
+   */
+  sortRange(r0: number, r1: number, c0: number, c1: number, col: number, desc: boolean): boolean {
+    if (r1 <= r0) return true;
+    if (this.merges.some((m) => overlaps(m, { r0, c0, r1, c1 }))) return false;
+    const items: { from: number; vals: string[]; styles: number[]; s: string; n: number; blank: boolean }[] = [];
+    for (let r = r0; r <= r1; r++) {
+      const vals: string[] = [], styles: number[] = [];
+      for (let c = c0; c <= c1; c++) { vals.push(this.raw(r, c)); styles.push(this.styleId(r, c)); }
+      const raw = this.raw(r, col);
+      items.push({ from: r, vals, styles, ...sortKey(raw.charCodeAt(0) === 61 ? this.engine.display(r, col) : raw) });
+    }
+    items.sort(sortCompare(desc));
+    const cells: CellSet[] = [];
+    items.forEach((it, j) => {
+      const to = r0 + j;
+      it.vals.forEach((v, k) => cells.push({ r: to, c: c0 + k, v: offsetFormula(v, to - it.from, 0), style: it.styles[k] }));
+    });
+    this.setCells(cells, "Sort range");
     return true;
   }
 
@@ -1173,6 +1186,24 @@ export class Doc {
     this.engine.structureChanged();
     this.changed();
   }
+}
+
+/** How a cell sorts: blanks last, then numbers (and dates) before text. */
+function sortKey(disp: string): { s: string; n: number; blank: boolean } {
+  let n = parseNum(disp);
+  if (Number.isNaN(n) && /\d/.test(disp)) { const dt = parseDate(disp); if (dt) n = (dt.getTime() - Date.UTC(1899, 11, 30)) / 86_400_000; } // as a date serial
+  return { s: disp, n, blank: disp === "" };
+}
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+function sortCompare(desc: boolean) {
+  const dir = desc ? -1 : 1;
+  return (a: { s: string; n: number; blank: boolean }, b: { s: string; n: number; blank: boolean }) => {
+    if (a.blank !== b.blank) return a.blank ? 1 : -1;
+    const an = !Number.isNaN(a.n), bn = !Number.isNaN(b.n);
+    if (an && bn) return (a.n - b.n) * dir;
+    if (an !== bn) return (an ? -1 : 1) * dir; // numbers before text (ascending)
+    return collator.compare(a.s, b.s) * dir;
+  };
 }
 
 function sameNames(a: Map<string, { name: string; ref: string }>, b: Map<string, { name: string; ref: string }>): boolean {

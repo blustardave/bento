@@ -367,13 +367,21 @@ export class App {
     this.activate(book.sheet);
   }
 
-  /** Save as a .bento sheet (keeps formatting, formulas, widths…). */
+  /**
+   * Save. A .bento saves in place; a CSV you opened saves back to the same
+   * CSV (with the separator, encoding and line endings it came with) —
+   * asking first if the sheet has things a CSV can't hold. Anything else, or
+   * Save As, asks where to put a .bento.
+   */
   async save(doc: Doc | null = this.active, saveAs = false): Promise<boolean> {
     if (!doc || doc.loading !== null) return false;
     if (this.grid.editing && this.active === doc) this.grid.commitEdit();
+    if (!saveAs && isTauri && doc.path && CSV_PATH.test(doc.path) && doc.book.sheets.length === 1) {
+      const r = await this.saveCsvInPlace(doc);
+      if (r !== "bento") return r === "saved";
+    }
     let path = doc.path;
     if (!path || !isBentoPath(path) || saveAs || !isTauri) {
-      // A CSV you opened gets a .bento next to it; the CSV is left alone.
       const suggested = (doc.path ?? doc.name).replace(/\.[^.\\/]+$/, "") + ".bento";
       path = await pickSavePath(suggested, "bento");
       if (!path) return false;
@@ -396,6 +404,41 @@ export class App {
     this.render();
     toast(`Saved ${doc.name}`);
     return true;
+  }
+
+  /** Files this sheet already said "yes, save as plain CSV" for (this session). */
+  private csvLossOk = new WeakSet<Book>();
+
+  /** Save an opened CSV back to itself. "bento" means: save a .bento copy instead. */
+  private async saveCsvInPlace(doc: Doc): Promise<"saved" | "cancel" | "bento"> {
+    const lost: string[] = [];
+    if (doc.hasFormatting()) lost.push(doc.objects.length ? "formatting, charts and pictures" : "formatting");
+    if (doc.merges.length) lost.push("merged cells");
+    if (doc.book.names.size) lost.push("named ranges");
+    if (lost.length && !this.csvLossOk.has(doc.book)) {
+      const formulas = doc.hasFormulas() ? (doc.saveFormulasAs === "formulas" ? " Formulas are saved as text." : " Formulas are saved as their results.") : "";
+      const choice = await modal(`Save ${doc.name} as plain CSV?`,
+        `A CSV only holds the values in this sheet, so the ${lost.join(", ")} won't be kept.${formulas} To keep everything, save a Bento copy instead.`,
+        [{ label: "Cancel", value: "cancel" as const }, { label: "Save a Bento copy…", value: "bento" as const }, { label: "Save CSV", value: "csv" as const, primary: true }]);
+      if (choice === null || choice === "cancel") return "cancel";
+      if (choice === "bento") return "bento";
+      this.csvLossOk.add(doc.book);
+    }
+    try {
+      const text = doc.toText(doc.saveFormulasAs !== "formulas");
+      await writeFile(doc.path!, encodeText(text, doc.encoding, doc.bom));
+    } catch (e) {
+      if (isNotAllowed(e)) return "bento";
+      toast(String(e instanceof Error ? e.message : e), true);
+      return "cancel";
+    }
+    doc.book.markSaved();
+    this.autosaver.discard(doc.book.id);
+    this.autosaver.settled(doc.book);
+    this.addRecent(doc.path);
+    this.render();
+    toast(`Saved ${doc.name}`);
+    return "saved";
   }
 
   /**
@@ -524,10 +567,11 @@ export class App {
     const book = doc.book;
     if (doc.protected) { toast(`"${doc.sheetName}" is protected — unprotect it first`); return; }
     if (book.sheets.length < 2) { toast("A file needs at least one sheet"); return; }
-    if (doc.rows.length) {
+    if (doc.rows.length || doc.objects.length) {
+      // Enter cancels here: deleting a sheet can't be undone.
       const ok = await modal(`Delete "${doc.sheetName}"?`, "This removes the sheet and everything on it. You can't undo this.", [
-        { label: "Cancel", value: false },
-        { label: "Delete", value: true, primary: true },
+        { label: "Delete", value: true, danger: true },
+        { label: "Cancel", value: false, primary: true },
       ]);
       if (!ok) return;
     }
@@ -1058,7 +1102,6 @@ export class App {
       divider(), ...f.fill,
       divider(), ...f.align,
       divider(),
-      t("link", toolButton({ icon: "link", title: "Insert link (coming soon)", onClick: () => {} })),
       t("filter", toolButton({ icon: "filter", title: "Filter column", onClick: (b) => withDoc((d) => {
         const r = b.getBoundingClientRect();
         openFilter(d, d.sel.ac, r.left, r.bottom + 4, () => this.afterStructure());
@@ -1095,6 +1138,25 @@ export class App {
     }
     this.grid.select({ ar: s.r0, ac: s.c0, fr: s.r1, fc: s.c1 }, false);
     this.onChange();
+  }
+
+  /** "Sort range" for a block of selected cells (not whole columns, which sort the sheet). */
+  private sortRangeItems(): MenuItem[] {
+    const d = this.active!;
+    const s = selRect(d.sel);
+    if (s.r1 <= s.r0 || this.grid.isWholeCols(s) || d.sel.extra?.length) return [];
+    const by = colName(d.sel.ac);
+    const run = (desc: boolean) => {
+      if (d.view) { toast("Clear filters and show hidden rows before sorting a range"); return; }
+      // A frozen heading row stays where it is.
+      const r0 = Math.max(s.r0, Math.min(d.frozenRows, s.r1)), r1 = Math.min(s.r1, d.rows.length - 1);
+      if (!d.sortRange(r0, r1, s.c0, s.c1, d.sel.ac, desc)) { toast("Can't sort a range with merged cells in it"); return; }
+      this.afterStructure();
+    };
+    return [{ label: "Sort range", children: [
+      { label: "A → Z", key: `by ${by}`, action: () => run(false) },
+      { label: "Z → A", key: `by ${by}`, action: () => run(true) },
+    ] }];
   }
 
   /** Sort, unless merged cells make it impossible. */
@@ -1147,7 +1209,12 @@ export class App {
       return;
     }
     const cells: { r: number; c: number; v: string }[] = [];
-    const below = s.r1 + 1;
+    // The first row below the selection with room for the totals (never
+    // writing over something that's already there).
+    const free = (r: number) => { for (let c = s.c0; c <= s.c1; c++) if (d.raw(d.dataRow(r), c) !== "") return false; return true; };
+    let below = s.r1 + 1;
+    while (!free(below) && below < s.r1 + 10_000) below++;
+    if (!free(below)) { toast("There's no empty row below the selection for the totals"); return; }
     const top = d.dataRow(s.r0) + 1;
     const bottom = d.dataRow(s.r1) + 1;
     for (let c = s.c0; c <= s.c1; c++) {
@@ -1200,7 +1267,7 @@ export class App {
 
   private preferences(section = "appearance") {
     closeMenus();
-    const isTauriApp = !document.getElementById("check-btn")!.hidden;
+    const isTauriApp = isTauri;
     const row = (label: string, hint: string | null, control: HTMLElement) =>
       el("div", { class: "prow" }, el("div", { class: "plabel" }, el("b", { text: label }), hint ? el("small", { text: hint }) : null), el("div", { class: "pctl" }, control));
     const seg = (opts: [string, string][], value: string, onPick: (v: string) => void) => {
@@ -1281,7 +1348,7 @@ export class App {
 
     /* Saving */
     const saving = el("div", { class: "psec" },
-      row("AutoSave", "Saved .bento files save themselves as you work. CSVs are never overwritten without asking.", sw(flag("bento.autosave"), (v) => localStorage.setItem("bento.autosave", v ? "on" : "off"))),
+      row("AutoSave", keys("Saved .bento files save themselves as you work. CSVs are never overwritten automatically — Ctrl+S saves them."), sw(flag("bento.autosave"), (v) => localStorage.setItem("bento.autosave", v ? "on" : "off"))),
       row("Crash recovery", "Unsaved work is always kept safe in the background and offered back if Bento closes unexpectedly.", el("span", { class: "pnote", text: "Always on" })),
     );
 
@@ -1505,6 +1572,7 @@ export class App {
         { label: "Everything", action: () => { this.grid.clear(); this.applyFormat(() => ({}), "Clear formatting"); } },
       ] },
       "sep",
+      ...this.sortRangeItems(),
       { label: "Formula", children: this.formulaItems() },
       ...extras,
       { label: "Fill down", key: keys("Ctrl+D"), action: () => this.grid.fillDown() },
@@ -2064,7 +2132,7 @@ export class App {
   }
 
   private async clipboardWrite(text: string | null) {
-    if (text === null) { if (!this.active?.sel.extra?.length) toast("That selection is too big to copy", true); return; }
+    if (text === null) return; // the grid has already said why
     try { await navigator.clipboard.writeText(text); } catch { toast(keys("Couldn't reach the clipboard — try Ctrl+C"), true); }
     this.onChange();
   }
@@ -2341,6 +2409,8 @@ function svg(inner: string, size: number, cls = ""): SVGElement {
 }
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+/** Files that save back as CSV/TSV text. */
+const CSV_PATH = /\.(csv|tsv|txt|tab)$/i;
 
 const CHART_ICONS: Record<ChartType, string> = {
   column: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M3.5 13V8.5M8 13V3.5M12.5 13V6.5" stroke-width="2.2"/></svg>',
