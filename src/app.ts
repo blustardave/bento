@@ -25,8 +25,7 @@ import { ObjectLayer, SHAPES } from "./objects";
 import { CHART_TYPES, chartData, dataRegion, parseRange, rangeText } from "./chart";
 import type { ChartObject, ChartType, ShapeObject, ShapeType, SheetObject } from "./doc";
 import { appVersion, initUpdater } from "./updater";
-import { maxOf } from "./util";
-import { basename, cellName, clamp, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
+import { basename, cellName, clamp, colIndex, colName, el, formatInt, formatStat, maxOf, nextFrame, parseNum } from "./util";
 import { cmdKey, isAltGr, isMac, keys, localiseTitles, osName } from "./platform";
 import { WheelZoom } from "./wheelzoom";
 
