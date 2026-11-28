@@ -77,10 +77,11 @@ export class AutoSaver {
       const quiet = now - t.changedAt >= QUIET_MS;
       const overdue = now - t.firstDirtyAt >= MAX_WAIT_MS;
       if (!quiet && !overdue) continue;
-      // Huge sheets take a moment to write, so their recovery copies are
-      // refreshed at most every 30 s rather than on every pause.
+      // Huge sheets take a moment to write (and the page pauses while the
+      // file is put together), so they're saved — in place or as a recovery
+      // copy — at most every 30 s rather than on every pause.
       const big = b.sheets.reduce((n, s) => n + s.rows.length, 0) > 200_000;
-      if (big && !overdue && !this.canAutoSave(b)) continue;
+      if (big && !overdue) continue;
       this.busy = true;
       try {
         if (this.canAutoSave(b) && await this.saveInPlace(b)) {

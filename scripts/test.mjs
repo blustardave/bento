@@ -9,7 +9,7 @@ mkdirSync("node_modules/.cache", { recursive: true });
 let failed = 0;
 for (const f of files) {
   const out = `node_modules/.cache/${f.replace(/\.ts$/, ".cjs")}`;
-  await build({ entryPoints: [`tests/${f}`], bundle: true, platform: "node", outfile: out, logLevel: "warning" });
+  await build({ entryPoints: [`tests/${f}`], bundle: true, platform: "node", outfile: out, logLevel: "warning", external: ["jsdom"] });
   const r = spawnSync(process.execPath, ["--max-old-space-size=4096", "--stack-size=984", out], { stdio: "inherit" });
   if (r.status !== 0) { failed++; console.log(`✗ ${f}`); }
 }

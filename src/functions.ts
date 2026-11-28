@@ -12,7 +12,7 @@ import {
   arr, at, cmp, col, criterion, dateOf, dims, each, isArr, isErr, isLam, isMulti, isOmit, isRef,
   scalar, serialYMD, toArr, toBool, toNum, toStr, wildcard, OMIT, formatNumber,
 } from "./fcore";
-import { colName, parseNum } from "./util";
+import { colName, maxOf, minOf, parseNum } from "./util";
 
 export interface Ctx {
   /** Evaluate a node in the current scope (or a given one). */
@@ -460,7 +460,7 @@ def("COUNTIFS", { min: 2, max: 254, args: "range1, criterion1, [range2, criterio
   let c = 0; for (let i = 0; i < m.h; i++) for (let j = 0; j < m.w; j++) if (m.hit(i, j)) c++;
   return c;
 } });
-const condAgg = (kind: "avg" | "min" | "max") => (vals: number[]) => kind === "avg" ? mean(vals) : vals.length ? (kind === "min" ? Math.min(...vals) : Math.max(...vals)) : 0;
+const condAgg = (kind: "avg" | "min" | "max") => (vals: number[]) => kind === "avg" ? mean(vals) : kind === "min" ? minOf(vals, 0) : maxOf(vals, 0);
 def("AVERAGEIF", { min: 2, max: 3, args: "range, criterion, [average_range]", desc: "The mean of the cells that meet a condition.", cat: "Statistics", fn: (a, x) => {
   const [h, w] = dims(a[0]);
   const target = given(a[2]) ? resized(a[2], h, w) : a[0];
@@ -771,11 +771,11 @@ const choose = (rows: boolean) => (a: Any[]) => {
 def("CHOOSEROWS", { min: 2, max: 255, args: "range, row1, [row2, …]", desc: "Picks rows by number.", cat: "Array", spills: true, fn: choose(true) });
 def("CHOOSECOLS", { min: 2, max: 255, args: "range, column1, [column2, …]", desc: "Picks columns by number.", cat: "Array", spills: true, fn: choose(false) });
 def("VSTACK", { min: 1, max: 255, args: "range1, [range2, …]", desc: "Stacks ranges on top of each other.", cat: "Array", spills: true, fn: (a) => {
-  const ms = a.map(toArr); const w = Math.max(...ms.map((m) => m[0]?.length ?? 0));
+  const ms = a.map(toArr); const w = maxOf(ms.map((m) => m[0]?.length ?? 0), 0);
   return arr(ms.flatMap((m) => m.map((r) => [...r, ...Array(w - r.length).fill(ERR.na)])));
 } });
 def("HSTACK", { min: 1, max: 255, args: "range1, [range2, …]", desc: "Puts ranges side by side.", cat: "Array", spills: true, fn: (a) => {
-  const ms = a.map(toArr); const h = Math.max(...ms.map((m) => m.length));
+  const ms = a.map(toArr); const h = maxOf(ms.map((m) => m.length), 0);
   return arr(Array.from({ length: h }, (_, i) => ms.flatMap((m) => m[i] ?? Array(m[0]?.length ?? 0).fill(ERR.na))));
 } });
 def("TOCOL", { min: 1, max: 3, args: "range, [ignore], [by_column]", desc: "Everything in one column.", cat: "Array", spills: true, fn: (a) => {
@@ -852,7 +852,7 @@ def("TEXTSPLIT", { min: 2, max: 4, args: "text, column_delimiter, [row_delimiter
   const ig = optB(a[3], false); if (isErr(ig)) return ig;
   const rows = splitter(rd, false)(s).filter((r) => !ig || r !== "");
   const m = rows.map((r) => splitter(cd, false)(r).filter((c) => !ig || c !== ""));
-  const w = Math.max(...m.map((r) => r.length));
+  const w = maxOf(m.map((r) => r.length), 0);
   return arr(m.map((r) => [...r, ...Array(w - r.length).fill(ERR.na)]));
 } });
 const beforeAfter = (after: boolean) => (a: Any[]) => {

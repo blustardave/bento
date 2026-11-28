@@ -1,8 +1,8 @@
 import { Delimiter, LineEnding, serialize } from "./csv";
 import { Encoding } from "./encoding";
-import { Engine, offsetFormula, remapFormula, renameSheetInFormula, shiftFormula } from "./formula";
+import { Engine, offsetFormula, remapFormula, renameNameInFormula, renameSheetInFormula, shiftFormula } from "./formula";
 import { Style, isEmptyStyle, styleKey } from "./format";
-import { parseNum } from "./util";
+import { maxOf, parseNum, pushAll } from "./util";
 
 /** Selection in *display* coordinates (what's on screen, after filtering). */
 export interface Sel {
@@ -290,20 +290,23 @@ export class Doc {
     const mBefore = this.merges.map((m) => ({ ...m }));
     const gBefore = [this.gridRows, this.gridCols];
     const oBefore = cloneObjects(this.objects);
+    // Defined names belong to the whole file, not this sheet: only put them
+    // back if this step itself changed them (e.g. deleting rows a name
+    // pointed at). Otherwise an undo here would wipe names made since.
     const nBefore = new Map(this.book.names);
-    let nAfter = nBefore;
     let mAfter: Rect[] = [];
     let gAfter = gBefore;
     let oAfter: SheetObject[] = [];
     const run = op.run, undo = op.undo;
-    op.run = () => { run(); };
-    op.undo = () => { undo(); this.merges = mBefore.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gBefore; this.objects = cloneObjects(oBefore); this.book.names = new Map(nBefore); };
     op.run();
     mAfter = this.merges.map((m) => ({ ...m }));
     gAfter = [this.gridRows, this.gridCols];
     oAfter = cloneObjects(this.objects);
-    nAfter = new Map(this.book.names);
-    op.run = () => { run(); this.merges = mAfter.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gAfter; this.objects = cloneObjects(oAfter); this.book.names = new Map(nAfter); };
+    const namesChanged = !sameNames(nBefore, this.book.names);
+    const nAfter = namesChanged ? new Map(this.book.names) : null;
+    const setNames = (m: Map<string, { name: string; ref: string }>) => { this.book.names = new Map(m); this.book.recalcAll(); };
+    op.undo = () => { undo(); this.merges = mBefore.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gBefore; this.objects = cloneObjects(oBefore); if (namesChanged) setNames(nBefore); };
+    op.run = () => { run(); this.merges = mAfter.map((m) => ({ ...m })); [this.gridRows, this.gridCols] = gAfter; this.objects = cloneObjects(oAfter); if (nAfter) setNames(nAfter); };
     this.undoStack.push(op);
     if (this.undoStack.length > MAX_UNDO) {
       const dropped = this.undoStack.shift();
@@ -390,6 +393,72 @@ export class Doc {
   }
 
   snapshotObjects(): SheetObject[] { return cloneObjects(this.objects); }
+
+  /** Add, change or remove defined names (file-wide) as one undo step on this sheet. */
+  changeNames(mutate: (names: Map<string, { name: string; ref: string }>) => void, label = "Name a range") {
+    let first = true;
+    this.push({
+      label,
+      selBefore: { ...this.sel },
+      // `push` records the names before and after, and swaps them on undo/redo.
+      run: () => { if (first) { first = false; mutate(this.book.names); this.book.recalcAll(); } },
+      undo: () => {},
+    });
+  }
+
+  /**
+   * Rename a defined name (and/or point it elsewhere), updating every
+   * formula in the file that uses it, as one undo step.
+   */
+  renameName(oldName: string, name: string, ref: string) {
+    const oldKey = oldName.toUpperCase();
+    const edits: { doc: Doc; row: string[]; c: number; was: string; now: string }[] = [];
+    if (oldKey !== name.toUpperCase()) {
+      for (const doc of this.book.sheets) for (const row of doc.rows) for (let c = 0; c < row.length; c++) {
+        const v = row[c];
+        if (v.charCodeAt(0) !== 61) continue;
+        const nv = renameNameInFormula(v, oldName, name);
+        if (nv !== v) edits.push({ doc, row, c, was: v, now: nv });
+      }
+    }
+    const apply = (forward: boolean) => {
+      for (const e of edits) e.row[e.c] = forward ? e.now : e.was;
+      for (const doc of new Set(edits.map((e) => e.doc))) { doc.engine.structureChanged(); doc.version++; }
+    };
+    let first = true;
+    this.push({
+      label: "Rename range",
+      selBefore: { ...this.sel },
+      run: () => {
+        apply(true);
+        if (first) { first = false; this.book.names.delete(oldKey); this.book.names.set(name.toUpperCase(), { name, ref }); this.book.recalcAll(); }
+      },
+      undo: () => apply(false),
+    });
+  }
+
+  /** Record a change to column widths (made live, e.g. by dragging) as one undo step. */
+  commitWidths(before: Map<number, number>, label = "Resize columns") {
+    const after = new Map(this.widths);
+    if (after.size === before.size && [...after].every(([k, v]) => before.get(k) === v)) return;
+    const b = new Map(before);
+    const set = (m: Map<number, number>) => { this.widths = new Map(m); this.remeasureAll(); };
+    this.push({ label, selBefore: { ...this.sel }, run: () => set(after), undo: () => set(b) });
+  }
+
+  /** Hide or show columns as one undo step. */
+  setColumnsHidden(cols: number[] | "all", hide: boolean) {
+    const before = new Set(this.hidden);
+    const after = new Set(this.hidden);
+    if (cols === "all") after.clear(); else for (const c of cols) { if (hide) after.add(c); else after.delete(c); }
+    if (after.size === before.size && [...after].every((c) => before.has(c))) return;
+    this.push({
+      label: hide ? "Hide columns" : "Unhide columns",
+      selBefore: { ...this.sel },
+      run: () => { this.hidden = new Set(after); this.version++; },
+      undo: () => { this.hidden = new Set(before); this.version++; },
+    });
+  }
 
   /** Store image data, returning its id (the same data gets the same id). */
   addImage(url: string): string {
@@ -489,7 +558,8 @@ export class Doc {
 
   /** Set (or with null, clear) the height of some data rows, as one undo step. */
   setRowHeights(rows: number[], h: number | null, label = "Resize rows") {
-    while (this.rows.length <= Math.max(...rows)) this.rows.push(new Array(this.cols).fill(""));
+    const last = maxOf(rows, -1);
+    while (this.rows.length <= last) this.rows.push(new Array(this.cols).fill(""));
     const targets = rows.map((r) => this.rows[r]);
     const before = targets.map((row) => this.manualHeights.get(row));
     this.push({
@@ -711,7 +781,7 @@ export class Doc {
     } else {
       while (this.rows.length < end) this.rows.push(new Array(this.cols).fill(""));
       const block = this.rows.splice(from, n);
-      this.rows.splice(to, 0, ...block);
+      this.rows = [...this.rows.slice(0, to), ...block, ...this.rows.slice(to)];
     }
     const local = { local: true, sheet: this.sheetName };
     for (const row of this.rows) for (let c = 0; c < row.length; c++) {
@@ -770,6 +840,11 @@ export class Doc {
   insertRows(at: number, n: number, like?: number) {
     let before: string[][] = [];
     let fx: CellChange[] = [];
+    // Made once and reused on redo: formatting, heights and hidden rows are
+    // keyed by the row itself, so later steps (redone after this) must find
+    // the very same rows again.
+    let fresh: string[][] | null = null;
+    let padding: string[][] | null = null;
     this.push({
       label: "Insert rows",
       selBefore: { ...this.sel },
@@ -779,14 +854,19 @@ export class Doc {
         const src = like !== undefined ? this.rows[like] : undefined;
         const srcStyle = src ? this.rowStyles.get(src) : undefined;
         const srcHeight = src ? this.manualHeights.get(src) : undefined;
-        if (at >= this.rows.length && !srcStyle && srcHeight === undefined) { fx = []; return; } // below the data: the sheet just gets longer
-        if (at > this.rows.length) this.rows = [...this.rows, ...Array.from({ length: at - this.rows.length }, () => [] as string[])];
-        const fresh: string[][] = [];
-        for (let i = 0; i < n; i++) {
-          const row: string[] = [];
-          if (srcStyle?.some(Boolean)) this.rowStyles.set(row, [...srcStyle]);
-          if (srcHeight !== undefined) this.putManual(row, srcHeight);
-          fresh.push(row);
+        if (at >= this.rows.length && !srcStyle && srcHeight === undefined && !fresh) { fx = []; return; } // below the data: the sheet just gets longer
+        if (at > this.rows.length) {
+          padding ??= Array.from({ length: at - this.rows.length }, () => [] as string[]);
+          this.rows = [...this.rows, ...padding];
+        }
+        if (!fresh) {
+          fresh = [];
+          for (let i = 0; i < n; i++) {
+            const row: string[] = [];
+            if (srcStyle?.some(Boolean)) this.rowStyles.set(row, [...srcStyle]);
+            if (srcHeight !== undefined) this.putManual(row, srcHeight);
+            fresh.push(row);
+          }
         }
         this.rows = [...this.rows.slice(0, at), ...fresh, ...this.rows.slice(at)];
         this.keepRows = Math.max(this.keepRows, 0) + n;
@@ -830,7 +910,7 @@ export class Doc {
           while (j + 1 < idx.length && idx[j + 1] === idx[j] - 1) j++;
           const start = idx[j];
           const count = j - i + 1;
-          fx.push(...this.shiftFormulas("row", start, -count));
+          pushAll(fx, this.shiftFormulas("row", start, -count));
           i = j + 1;
         }
         this.refreshView();
@@ -844,10 +924,11 @@ export class Doc {
     let fx: CellChange[] = [];
     let oldCols = 0;
     let oldKeep = 0;
-    const shiftMeta = (dir: 1 | -1) => {
-      this.widths = shiftMap(this.widths, at, dir * n);
-      this.hidden = shiftSet(this.hidden, at, dir * n);
-      this.filters = shiftMap(this.filters, at, dir * n);
+    let oldMeta: [Map<number, number>, Set<number>, Map<number, Set<string>>] | null = null;
+    const shiftMeta = () => {
+      this.widths = shiftMap(this.widths, at, n);
+      this.hidden = shiftSet(this.hidden, at, n);
+      this.filters = shiftMap(this.filters, at, n);
     };
     this.push({
       label: "Insert columns",
@@ -855,6 +936,9 @@ export class Doc {
       run: () => {
         oldCols = this.cols;
         oldKeep = this.keepCols;
+        // Kept whole, so undo puts widths back exactly (shifting them back
+        // would let the copied widths land on the column to the left).
+        oldMeta = [this.widths, this.hidden, this.filters];
         this.gridCols = Math.max(this.gridCols, this.cols) + n;
         const blanks = new Array<string>(n).fill("");
         const zeros = new Array<number>(n).fill(0);
@@ -865,7 +949,7 @@ export class Doc {
         }
         if (this.cols > at || at < this.keepCols) this.cols += n;
         this.keepCols = Math.max(this.keepCols, at) + n;
-        shiftMeta(1);
+        shiftMeta();
         if (like !== undefined) {
           const src = like >= at ? like + n : like;
           for (const row of this.rows) {
@@ -889,7 +973,7 @@ export class Doc {
         }
         this.cols = oldCols;
         this.keepCols = oldKeep;
-        shiftMeta(-1);
+        if (oldMeta) [this.widths, this.hidden, this.filters] = oldMeta;
       },
     });
   }
@@ -1014,13 +1098,14 @@ export class Doc {
     if (hiddenValues && hiddenValues.size) this.filters.set(col, hiddenValues);
     else this.filters.delete(col);
     this.refreshView();
-    this.version++;
+    this.markDirty(); // filters are saved in the file
   }
 
   clearFilters() {
+    if (!this.filters.size) return;
     this.filters.clear();
     this.refreshView();
-    this.version++;
+    this.markDirty();
   }
 
   refreshView() {
@@ -1052,7 +1137,14 @@ export class Doc {
       if (!empty) break;
       colCount--;
     }
-    const get = asValues ? (r: number, c: number) => this.display(r, c) : (r: number, c: number) => this.raw(r, c);
+    // Text that merely starts with "=" ("=== Totals ===", "=Notes") isn't a
+    // working formula: write it back as it was, not as #ERROR! / #NAME?.
+    const get = asValues
+      ? (r: number, c: number) => {
+        const raw = this.raw(r, c);
+        return raw.charCodeAt(0) === 61 && this.engine.isNotAFormula(raw) ? raw : this.display(r, c);
+      }
+      : (r: number, c: number) => this.raw(r, c);
     return serialize(rowCount, colCount, get, this.delim, this.eol, this.trailingNewline);
   }
 
@@ -1081,6 +1173,12 @@ export class Doc {
     this.engine.structureChanged();
     this.changed();
   }
+}
+
+function sameNames(a: Map<string, { name: string; ref: string }>, b: Map<string, { name: string; ref: string }>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) { const w = b.get(k); if (!w || w.name !== v.name || w.ref !== v.ref) return false; }
+  return true;
 }
 
 function overlaps(a: Rect, b: Rect): boolean {

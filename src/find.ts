@@ -16,7 +16,7 @@ export class FindPanel {
   private repRow: HTMLElement;
   private showRep!: HTMLElement;
   private count: HTMLElement;
-  private opts = { caseSensitive: false, whole: false, regex: false };
+  private opts = { caseSensitive: false, whole: false, regex: false, formulas: false };
   private matches: Match[] = [];
   private idx = -1;
   private capped = false;
@@ -36,9 +36,10 @@ export class FindPanel {
     const next = iconBtn("caret", "Next (Enter)");
     const close = el("button", { class: "find-icon", title: "Close (Esc)" });
     close.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M4.25 4.25l7.5 7.5M11.75 4.25l-7.5 7.5"/></svg>';
-    const toggles = (["caseSensitive", "whole", "regex"] as const).map((k) => {
-      const label = k === "caseSensitive" ? "Match case" : k === "whole" ? "Whole cell" : "Regex";
-      const title = k === "caseSensitive" ? "Match case" : k === "whole" ? "Match entire cell" : "Regular expression";
+    const toggles = (["caseSensitive", "whole", "regex", "formulas"] as const).map((k) => {
+      const label = k === "caseSensitive" ? "Match case" : k === "whole" ? "Whole cell" : k === "regex" ? "Regex" : "In formulas";
+      const title = k === "caseSensitive" ? "Match case" : k === "whole" ? "Match entire cell" : k === "regex" ? "Regular expression"
+        : "Search the formulas themselves (e.g. A1 in =SUM(A1:A9)), not the answers they show";
       const b = el("button", { class: "find-opt", text: label, title });
       b.addEventListener("click", () => { this.opts[k] = !this.opts[k]; b.classList.toggle("on", this.opts[k]); this.search(); this.q.focus(); });
       return b;
@@ -134,13 +135,17 @@ export class FindPanel {
       for (let c = 0; c < row.length; c++) {
         const v = row[c];
         if (!v) continue;
-        if (re.test(v.charCodeAt(0) === 61 ? d.display(dr, c) : v)) {
+        if (re.test(this.searchText(d, dr, c, v))) {
           this.matches.push({ r, c });
           if (this.matches.length >= MAX_MATCHES) { this.capped = true; break; }
         }
       }
     }
-    this.grid.matcher = (s) => s !== "" && re.test(s);
+    const inFormulas = this.opts.formulas;
+    this.grid.matcher = (shown, raw) => {
+      const t = inFormulas && raw.charCodeAt(0) === 61 ? raw : shown;
+      return t !== "" && re.test(t);
+    };
     // Start from the first match at or after the current cell.
     const { ar, ac } = d.sel;
     const i = this.matches.findIndex((m) => m.r > ar || (m.r === ar && m.c >= ac));
@@ -170,6 +175,16 @@ export class FindPanel {
     this.updateCount();
   }
 
+  /** What a cell is searched by: its text, or for a formula its answer (or the formula itself, with "In formulas"). */
+  private searchText(d: Doc, dr: number, c: number, raw: string): string {
+    return raw.charCodeAt(0) === 61 && !this.opts.formulas ? d.display(dr, c) : raw;
+  }
+
+  /** Replace can only change what's typed in a cell: a formula's answer isn't. */
+  private replaceable(raw: string): boolean {
+    return raw.charCodeAt(0) !== 61 || this.opts.formulas;
+  }
+
   private replaceIn(v: string): string {
     const re = this.regex(true)!;
     const rep = this.rep.value;
@@ -184,6 +199,11 @@ export class FindPanel {
     if (!m) return;
     const dr = d.dataRow(m.r);
     const raw = d.raw(dr, m.c);
+    if (!this.replaceable(raw)) {
+      toast("That's a formula's answer, which Replace can't change — turn on “In formulas” to edit the formula");
+      this.step(1);
+      return;
+    }
     const nv = this.replaceIn(raw);
     if (nv !== raw) { d.setCells([{ r: dr, c: m.c, v: nv }], "Replace"); this.onChange(); }
     this.search(false);
@@ -195,15 +215,19 @@ export class FindPanel {
     if (!d) return;
     this.search(false);
     const cells: { r: number; c: number; v: string }[] = [];
+    let skipped = 0;
     for (const m of this.matches) {
       const dr = d.dataRow(m.r);
       const raw = d.raw(dr, m.c);
+      if (!this.replaceable(raw)) { skipped++; continue; }
       const nv = this.replaceIn(raw);
       if (nv !== raw) cells.push({ r: dr, c: m.c, v: nv });
     }
     d.setCells(cells, "Replace all");
     this.onChange();
-    toast(cells.length ? `Replaced ${formatInt(cells.length)} cell${cells.length === 1 ? "" : "s"}` : "Nothing to replace");
+    const done = cells.length ? `Replaced ${formatInt(cells.length)} cell${cells.length === 1 ? "" : "s"}` : "Nothing to replace";
+    const left = skipped ? ` · ${formatInt(skipped)} formula answer${skipped === 1 ? "" : "s"} matched but weren't changed (turn on “In formulas” to edit formulas)` : "";
+    toast(done + left);
     this.search(false);
   }
 }

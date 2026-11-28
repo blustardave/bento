@@ -5,7 +5,7 @@ import { Engine, offsetFormula } from "./formula";
 import { tokenize, type Tok } from "./fcore";
 import { fillValues } from "./fill";
 import { DEFAULT_FONT, DEFAULT_SIZE, Style, Theme, applyNumFmt, ptToPx, resolveColor } from "./format";
-import { clamp, colName, parseNum } from "./util";
+import { clamp, colName, maxOf, parseNum, pushAll } from "./util";
 
 const BASE_ROW_H = 22;
 const BASE_HEAD_H = 24;
@@ -48,7 +48,7 @@ type Drag =
   | { kind: "cells" }
   | { kind: "cols" }
   | { kind: "rows" }
-  | { kind: "resize"; col: number; startX: number; startW: number }
+  | { kind: "resize"; col: number; startX: number; startW: number; before: Map<number, number> }
   | { kind: "fill"; src: Rect }
   | { kind: "move"; src: Rect; grabR: number; grabC: number }
   | { kind: "freezeRows" }
@@ -181,7 +181,7 @@ export class Grid {
   private hoverFreeze: "freezeRows" | "freezeCols" | null = null;
   private editorWraps = false;
   /** When set, cells whose text matches are highlighted (find). */
-  matcher: ((s: string) => boolean) | null = null;
+  matcher: ((shown: string, raw: string) => boolean) | null = null;
   /** Zoom factor (1 = 100%). Column widths are stored unzoomed. */
   zoom = 1;
 
@@ -867,7 +867,7 @@ export class Grid {
         if (dr >= d.rows.length) break;
         for (let c = c0; c <= c1; c++) {
           if (covered.has(r * 65536 + c) || !this.cw(c)) continue;
-          if (this.matcher(d.display(dr, c))) { const b = boxOf(r, c, mergeOf(r, c)); ctx.fillRect(b.x, b.y, b.w, b.h); }
+          if (this.matcher(d.display(dr, c), d.raw(dr, c))) { const b = boxOf(r, c, mergeOf(r, c)); ctx.fillRect(b.x, b.y, b.w, b.h); }
         }
       }
     }
@@ -1199,7 +1199,7 @@ export class Grid {
   toggleChecks(cells?: { r: number; c: number }[]) {
     const d = this.doc!;
     const list: { r: number; c: number }[] = [];
-    if (cells) list.push(...cells.map(({ r, c }) => ({ r: d.dataRow(r), c })));
+    if (cells) pushAll(list, cells.map(({ r, c }) => ({ r: d.dataRow(r), c })));
     else for (const rect of allRects(d.sel)) for (let r = rect.r0; r <= Math.min(rect.r1, this.lastRow() + 1000); r++) {
       const dr = d.dataRow(r);
       if (dr >= d.rows.length) break;
@@ -1585,8 +1585,7 @@ export class Grid {
         let a = cc, b = cc;
         while (a > 0 && d.hidden.has(a - 1)) a--;
         while (d.hidden.has(b + 1)) b++;
-        for (let i = a; i <= b; i++) d.hidden.delete(i);
-        d.version++;
+        d.setColumnsHidden(Array.from({ length: b - a + 1 }, (_, k) => a + k), false);
         this.invalidate();
         this.hooks.onChange();
         return true;
@@ -1744,8 +1743,10 @@ export class Grid {
     for (let r = 0; r < Math.min(n, 3000); r++) sample(r);
     const first = this.rowAtBody(this.sy);
     for (let r = first; r < first + 80; r++) { const dr = d.dataRow(r); if (dr < n) sample(dr); }
+    const before = new Map(d.widths);
     d.widths.set(c, clamp(Math.ceil(max + BASE_PAD * 2 + 4), 44, 640));
     d.remeasureAll();
+    d.commitWidths(before, "Fit column");
     this.invalidate();
     this.hooks.onChange();
   }
@@ -2357,7 +2358,7 @@ export class Grid {
     let block = internal ? (mode === "values" ? internal.values : internal.raw) : fromTSV(text);
     let styles = internal?.styles;
     if (mode === "transpose") {
-      const t = <T,>(m: T[][], blank: T) => { const w = Math.max(...m.map((r) => r.length)); return Array.from({ length: w }, (_, j) => m.map((r) => r[j] ?? blank)); };
+      const t = <T,>(m: T[][], blank: T) => { const w = maxOf(m.map((r) => r.length), 0); return Array.from({ length: w }, (_, j) => m.map((r) => r[j] ?? blank)); };
       block = t(block, "");
       if (styles) styles = t(styles, {} as Style);
       // Formulas would point the wrong way once flipped: keep them only from outside.
@@ -2368,7 +2369,7 @@ export class Grid {
     const keepValues = mode !== "format";
     const s = selRect(d.sel);
     const bh = block.length;
-    const bw = Math.max(...block.map((r) => r.length));
+    const bw = maxOf(block.map((r) => r.length), 0);
     // A single copied value pasted onto a bigger selection fills it.
     const fill = bh === 1 && bw === 1 && (s.r1 > s.r0 || s.c1 > s.c0);
     const h = fill ? s.r1 - s.r0 + 1 : bh;
@@ -2398,8 +2399,10 @@ export class Grid {
     d.setCells(cells, mode === "normal" ? "Paste" : "Paste special", after);
     if (internal && (mode === "normal" || mode === "format")) {
       if (internal.widths && this.isWholeCols(s)) {
+        const before = new Map(d.widths);
         internal.widths.forEach((w, j) => d.widths.set(s.c0 + j, w));
         d.remeasureAll();
+        d.commitWidths(before, "Paste column widths");
       }
       if (internal.heights && this.isWholeRows(s)) {
         const byH = new Map<number | null, number[]>();
@@ -2682,7 +2685,7 @@ export class Grid {
       }
       const rc = this.resizeColAt(x, y);
       if (rc >= 0) {
-        this.drag = { kind: "resize", col: rc, startX: x, startW: d.width(rc) };
+        this.drag = { kind: "resize", col: rc, startX: x, startW: d.width(rc), before: new Map(d.widths) };
         sc.setPointerCapture(e.pointerId);
         return;
       }
@@ -2750,7 +2753,7 @@ export class Grid {
         requestAnimationFrame(() => { if (!this.drag) this.hoverCursor(p.x, p.y); });
       }
       if (drag?.kind === "reorder") this.endReorder(drag, e.type === "pointerup");
-      if (drag?.kind === "resize") { this.doc?.remeasureAll(); this.hooks.onChange(); }
+      if (drag?.kind === "resize" && this.doc) { this.doc.remeasureAll(); this.doc.commitWidths(drag.before, "Resize column"); this.hooks.onChange(); }
       if (drag?.kind === "move") {
         const t = this.moveTarget;
         this.moveTarget = null;

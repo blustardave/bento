@@ -6,6 +6,7 @@
  * ------------------------------------------------------------------ */
 import * as fjs from "@formulajs/formulajs";
 import { jStat } from "jstat";
+import { maxOf, minOf } from "./util";
 import {
   Any, ERR, FErr, LamV, Node, Val, criterion,
   arr, at, cmp, col, dateOf, dims, each, isArr, isErr, isLam, isMulti, isOmit, isRef, scalar, serialOf, toArr, toNum, toStr,
@@ -212,8 +213,8 @@ dbFn("DSUM", "Adds a database column where rows meet criteria.", (n) => n.reduce
 dbFn("DAVERAGE", "Averages a database column where rows meet criteria.", (n) => n.length ? n.reduce((p, q) => p + q, 0) / n.length : ERR.div0);
 dbFn("DCOUNT", "Counts numbers in a database column where rows meet criteria.", (n) => n.length);
 dbFn("DCOUNTA", "Counts non-empty cells where rows meet criteria.", (_n, v) => v.filter((x) => x !== "").length);
-dbFn("DMAX", "Largest value where rows meet criteria.", (n) => n.length ? Math.max(...n) : 0);
-dbFn("DMIN", "Smallest value where rows meet criteria.", (n) => n.length ? Math.min(...n) : 0);
+dbFn("DMAX", "Largest value where rows meet criteria.", (n) => maxOf(n, 0));
+dbFn("DMIN", "Smallest value where rows meet criteria.", (n) => minOf(n, 0));
 dbFn("DPRODUCT", "Multiplies values where rows meet criteria.", (n) => n.reduce((p, q) => p * q, 1));
 dbFn("DGET", "The one value where rows meet criteria.", (_n, v) => v.length === 1 ? v[0] : v.length ? ERR.num : ERR.value);
 dbFn("DSTDEV", "Standard deviation (sample) where rows meet criteria.", (n) => { const v = dbVar(n, true); return isErr(v) ? v : Math.sqrt(v); });

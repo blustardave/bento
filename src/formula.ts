@@ -10,7 +10,7 @@ import {
 } from "./fcore";
 import type { Ctx } from "./functions";
 import { FUNCS } from "./library";
-import { colName } from "./util";
+import { colName, pushAll } from "./util";
 
 export { FErr, formatNumber };
 export type { Val };
@@ -235,6 +235,15 @@ export class Engine implements EngineLike {
     return ast;
   }
 
+  /**
+   * Text starting with "=" that isn't a working formula at all: it doesn't
+   * parse ("=== Totals ==="), or is a lone word that names nothing ("=Notes").
+   */
+  isNotAFormula(raw: string): boolean {
+    const ast = this.compile(raw);
+    return isErr(ast) || (ast.k === "name" && this.host.definedName?.(ast.v) === undefined);
+  }
+
   /* -------------------------------- spills -------------------------------- */
 
   private blocked(r: number, c: number, a: ArrV): boolean {
@@ -384,7 +393,7 @@ export class Engine implements EngineLike {
     for (let k = Math.min(i, j); k <= Math.max(i, j); k++) {
       const eng = this.sheetEngine(names[k]);
       if (isErr(eng)) return eng;
-      rows.push(...toArr(this.rangeOf(eng, r1, c1, r2, c2)));
+      pushAll(rows, toArr(this.rangeOf(eng, r1, c1, r2, c2)));
     }
     return { k: "arr", v: rows };
   }
@@ -827,6 +836,24 @@ export function renameSheetInFormula(src: string, from: string, to: string): str
     })();
     return sheetPrefix(b ? `${a}:${b}` : a) + rest;
   });
+}
+
+/** Replace a defined name used in a formula (not functions or text that happen to match). */
+export function renameNameInFormula(src: string, from: string, to: string): string {
+  if (!src.startsWith("=")) return src;
+  let toks;
+  try { toks = tokenize(src.slice(1)); } catch { return src; }
+  const body = src.slice(1);
+  const want = from.toUpperCase();
+  let out = "", last = 0;
+  toks.forEach((t, i) => {
+    if (t.t !== "id" || t.v !== want) return;
+    const next = toks[i + 1];
+    if (next && next.t === "op" && next.v === "(") return; // a function call, not the name
+    out += body.slice(last, t.s) + to;
+    last = t.e;
+  });
+  return last ? "=" + out + body.slice(last) : src;
 }
 
 export { sheetPrefix };

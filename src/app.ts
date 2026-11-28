@@ -1,4 +1,4 @@
-import { CsvParser, Delimiter, LineEnding, sniffDelimiter, sniffLineEnding } from "./csv";
+import { CsvParser, Delimiter, LineEnding, looksLikeHeader, sniffDelimiter, sniffLineEnding } from "./csv";
 import { Book, Doc, allRects, selRect } from "./doc";
 import { Encoding, decodeBytes, encodeText } from "./encoding";
 import { openFilter } from "./filter";
@@ -25,6 +25,7 @@ import { ObjectLayer, SHAPES } from "./objects";
 import { CHART_TYPES, chartData, dataRegion, parseRange, rangeText } from "./chart";
 import type { ChartObject, ChartType, ShapeObject, ShapeType, SheetObject } from "./doc";
 import { appVersion, initUpdater } from "./updater";
+import { maxOf } from "./util";
 import { basename, cellName, clamp, colIndex, colName, el, formatInt, formatStat, nextFrame, parseNum } from "./util";
 import { isMac, keys, localiseTitles, osName } from "./platform";
 
@@ -243,6 +244,8 @@ export class App {
     doc.widths.clear();
     doc.filters.clear();
     doc.view = null;
+    // A heading row stays put when sorting/filtering (and shows as one).
+    doc.frozenRows = looksLikeHeader(p.rows, (s) => !Number.isNaN(parseNum(s))) ? 1 : 0;
     doc.loading = null;
     this.grid.autoFitInitial(doc);
     doc.remeasureAll(); // rows with line breaks grow to fit
@@ -261,12 +264,16 @@ export class App {
 
   async closeDoc(doc: Doc): Promise<boolean> {
     if (this.grid.editing && this.active === doc) this.grid.commitEdit();
+    let autoSaveFailed = false;
     if (doc.book.dirty && this.autosaver.canAutoSave(doc.book)) {
-      if (!(await this.saveQuietly(doc.book))) return false;
+      // If the quiet save fails (file locked, drive gone…), fall through to
+      // asking: never leave the tab impossible to close.
+      autoSaveFailed = !(await this.saveQuietly(doc.book));
     }
     if (doc.book.dirty) {
       if (this.active !== doc) this.activate(doc);
-      const choice = await modal(`Save changes to ${doc.name}?`, "Your changes will be lost if you don't save them.", [
+      const why = autoSaveFailed ? `AutoSave couldn't write to ${doc.name}, so your latest changes aren't saved yet.` : "Your changes will be lost if you don't save them.";
+      const choice = await modal(`Save changes to ${doc.name}?`, why, [
         { label: "Cancel", value: "cancel" },
         { label: "Don't save", value: "discard" },
         { label: "Save", value: "save", primary: true },
@@ -298,13 +305,21 @@ export class App {
       await writeFile(book.path, await encodeBento(book));
       // Only mark saved if nothing changed while writing.
       if (book.token === token) book.markSaved();
+      this.autoSaveWarned.delete(book.id);
       this.render();
       return true;
     } catch (e) {
       console.warn("AutoSave couldn't write", e);
+      // Say so once (until it works again): a silent failure looks like it's saving.
+      if (!this.autoSaveWarned.has(book.id)) {
+        this.autoSaveWarned.add(book.id);
+        toast(`AutoSave couldn't save ${book.name}. Your changes are kept safe — use Save As to save them somewhere else.`, true);
+      }
       return false;
     }
   }
+
+  private autoSaveWarned = new Set<string>();
 
   /** After a crash: offer back any recovery copies that were left behind. */
   private async offerRecovery() {
@@ -1165,7 +1180,7 @@ export class App {
       "sep",
       { label: "Unfreeze rows and columns", disabled: !d || (!d.frozenRows && !d.frozenCols), action: () => { d!.setFrozen(0, 0); this.afterFreeze(); } },
       { label: "Clear all filters", disabled: !d?.filters.size, action: () => { d!.clearFilters(); this.afterStructure(); } },
-      { label: "Unhide all columns", disabled: !d?.hidden.size, action: () => { d!.hidden.clear(); this.onChange(); } },
+      { label: "Unhide all columns", disabled: !d?.hidden.size, action: () => { d!.setColumnsHidden("all", false); this.onChange(); } },
       "sep",
       { label: "Preferences…", key: keys("Ctrl+,"), action: () => this.preferences() },
       { label: "Keyboard shortcuts", key: "F1", action: () => this.shortcuts() },
@@ -1464,7 +1479,7 @@ export class App {
         { label: "Select all", key: keys("Ctrl+A"), action: () => this.grid.selectAll() },
         { label: "Clear all filters", disabled: !d.filters.size, action: () => { d.clearFilters(); this.afterStructure(); } },
         { label: "Unhide all rows", disabled: !d.hiddenRowCount(), action: () => this.unhideRows() },
-        { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.hidden.clear(); this.onChange(); } },
+        { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.setColumnsHidden("all", false); this.onChange(); } },
       ], x, y);
       return;
     }
@@ -1615,8 +1630,7 @@ export class App {
     const what = n === 1 ? "column" : `${n} columns`;
     const cols = this.colItems();
     const hideRange = () => {
-      for (let i = s.c0; i <= s.c1; i++) d.hidden.add(i);
-      d.version++;
+      d.setColumnsHidden(Array.from({ length: s.c1 - s.c0 + 1 }, (_, k) => s.c0 + k), true);
       // Move the selection off the hidden columns.
       const next = s.c1 + 1 < d.displayCols() ? s.c1 + 1 : Math.max(0, s.c0 - 1);
       this.grid.select({ ar: d.sel.ar, ac: next, fr: d.sel.ar, fc: next }, false);
@@ -1640,7 +1654,7 @@ export class App {
         "sep",
         { label: `Freeze up to column ${colName(s.c1)}`, action: () => { d.setFrozen(d.frozenRows, s.c1 + 1); this.afterFreeze(); } },
         { label: "Unfreeze columns", disabled: !d.frozenCols, action: () => { d.setFrozen(d.frozenRows, 0); this.afterFreeze(); } },
-        { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.hidden.clear(); this.onChange(); } },
+        { label: "Unhide all columns", disabled: !d.hidden.size, action: () => { d.setColumnsHidden("all", false); this.onChange(); } },
       ] },
     ], x, y);
   }
@@ -1681,7 +1695,8 @@ export class App {
     const s = selRect(d.sel);
     const want = rows.length ? rows : [];
     if (!want.length) for (let r = s.r0; r <= s.r1; r++) want.push(d.dataRow(r));
-    while (d.rows.length <= Math.max(...want)) d.rows.push(new Array(d.cols).fill(""));
+    const lastWanted = maxOf(want, -1);
+    while (d.rows.length <= lastWanted) d.rows.push(new Array(d.cols).fill(""));
     if (want.length >= d.displayRows()) { toast("At least one row has to stay visible"); return; }
     d.setRowsHidden(want, true);
     this.grid.select({ ar: s.r0, ac: d.sel.ac, fr: s.r0, fc: d.sel.ac }, false);
@@ -1720,7 +1735,13 @@ export class App {
       if (mode.v === "set") {
         const v = Number(input.value);
         if (!Number.isFinite(v) || v <= 0) { input.focus(); return false; }
-        if (isCol) { for (let c = s.c0; c <= s.c1; c++) d.widths.set(c, clamp(Math.round(v), 20, 2000)); d.remeasureAll(); d.version++; this.grid.invalidate(); this.onChange(); }
+        if (isCol) {
+          const before = new Map(d.widths);
+          for (let c = s.c0; c <= s.c1; c++) d.widths.set(c, clamp(Math.round(v), 20, 2000));
+          d.commitWidths(before, "Resize columns");
+          this.grid.invalidate();
+          this.onChange();
+        }
         else { d.setRowHeights(this.selectedDataRows(), clamp(Math.round(v), 12, 1000)); this.onChange(); }
       } else {
         if (isCol) for (let c = s.c0; c <= s.c1; c++) this.grid.autoFit(c);
@@ -2163,7 +2184,7 @@ export class App {
           const d = this.active;
           const p = nameProblem(d.book, v);
           if (p) { toast(p, true); box.select(); return; }
-          defineName(d.book, v, this.selectionRef());
+          defineName(d, v, this.selectionRef());
           toast(`Named ${this.selectionRef()} "${v}" — use it in formulas, e.g. =SUM(${v})`);
           box.blur(); this.grid.focus(); this.onSelection();
         }
